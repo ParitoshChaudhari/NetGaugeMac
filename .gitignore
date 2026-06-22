@@ -1,0 +1,26 @@
+# Xcode and Swift Package Manager build files
+.build/
+Packages/
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# Compiled App Bundle
+NetGaugeMac.app/
+
+# macOS system files
+.DS_Store
+
+# Temporary log files
+*.log
+debug_app.log
+netgauge.log
+
+# Database files (local storage)
+*.db
+*.db-wal
+*.db-shm
+
+# Installer DMG
+# NetGaugeMac.dmg
