@@ -9,8 +9,32 @@ struct UsageEvent: Codable, Identifiable, Equatable, Sendable {
     let bytesReceived: UInt64
     let bytesSent: UInt64
     let intervalSeconds: TimeInterval
+    let networkName: String?
 
     var totalBytes: UInt64 { bytesReceived + bytesSent }
+
+    enum CodingKeys: String, CodingKey {
+        case id, timestamp, bytesReceived, bytesSent, intervalSeconds, networkName
+    }
+
+    init(id: UUID = UUID(), timestamp: Date, bytesReceived: UInt64, bytesSent: UInt64, intervalSeconds: TimeInterval, networkName: String? = nil) {
+        self.id = id
+        self.timestamp = timestamp
+        self.bytesReceived = bytesReceived
+        self.bytesSent = bytesSent
+        self.intervalSeconds = intervalSeconds
+        self.networkName = networkName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        self.timestamp = try container.decode(Date.self, forKey: .timestamp)
+        self.bytesReceived = try container.decode(UInt64.self, forKey: .bytesReceived)
+        self.bytesSent = try container.decode(UInt64.self, forKey: .bytesSent)
+        self.intervalSeconds = try container.decode(TimeInterval.self, forKey: .intervalSeconds)
+        self.networkName = try container.decodeIfPresent(String.self, forKey: .networkName)
+    }
 }
 
 struct UsageBucket: Identifiable, Equatable, Sendable {
@@ -20,6 +44,22 @@ struct UsageBucket: Identifiable, Equatable, Sendable {
     let received: UInt64
     let sent: UInt64
     var total: UInt64 { received + sent }
+}
+
+struct NetworkUsageStats: Identifiable, Equatable, Sendable {
+    var id: String { networkName }
+    let networkName: String
+    let todayRx: UInt64
+    let todayTx: UInt64
+    let monthRx: UInt64
+    let monthTx: UInt64
+    let totalRx: UInt64
+    let totalTx: UInt64
+    let lastUpdated: Date
+
+    var todayTotal: UInt64 { todayRx + todayTx }
+    var monthTotal: UInt64 { monthRx + monthTx }
+    var totalBytes: UInt64 { totalRx + totalTx }
 }
 
 // MARK: - SQLite Wrapper
@@ -88,6 +128,20 @@ final class SQLiteStatement {
         sqlite3_column_int64(stmt, index)
     }
 
+    func bind(index: Int32, value: String) throws {
+        let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        if sqlite3_bind_text(stmt, index, value, -1, SQLITE_TRANSIENT) != SQLITE_OK {
+            throw DatabaseError.bindFailed
+        }
+    }
+
+    func columnText(index: Int32) -> String? {
+        if let ptr = sqlite3_column_text(stmt, index) {
+            return String(cString: ptr)
+        }
+        return nil
+    }
+
     func reset() {
         sqlite3_reset(stmt)
         sqlite3_clear_bindings(stmt)
@@ -135,24 +189,83 @@ actor UsageStore {
         let db = try SQLiteDatabase(path: dbURL.path)
         self.database = db
 
+        // Check schema migration
+        var needsMigration = false
+        do {
+            let stmt = try db.prepare(sql: "PRAGMA table_info(network_minutes);")
+            var hasNetworkName = false
+            while stmt.step() == SQLITE_ROW {
+                if let colName = stmt.columnText(index: 1), colName == "network_name" {
+                    hasNetworkName = true
+                    break
+                }
+            }
+            if !hasNetworkName {
+                // If table is empty/doesn't exist, we don't need migration, but we check if we can select from it first
+                let checkStmt = try db.prepare(sql: "SELECT 1 FROM sqlite_master WHERE type='table' AND name='network_minutes';")
+                if checkStmt.step() == SQLITE_ROW {
+                    needsMigration = true
+                }
+            }
+        } catch {
+            needsMigration = false
+        }
+
+        if needsMigration {
+            try? db.execute(sql: "ALTER TABLE network_minutes RENAME TO old_network_minutes;")
+            try? db.execute(sql: "ALTER TABLE network_hours RENAME TO old_network_hours;")
+            try? db.execute(sql: "ALTER TABLE network_days RENAME TO old_network_days;")
+        }
+
         // Create retention tables
         try db.execute(sql: """
             CREATE TABLE IF NOT EXISTS network_minutes (
-                ts INTEGER PRIMARY KEY,
+                ts INTEGER,
+                network_name TEXT NOT NULL,
                 bytes_rx INTEGER NOT NULL,
-                bytes_tx INTEGER NOT NULL
+                bytes_tx INTEGER NOT NULL,
+                PRIMARY KEY (ts, network_name)
             );
             CREATE TABLE IF NOT EXISTS network_hours (
-                ts INTEGER PRIMARY KEY,
+                ts INTEGER,
+                network_name TEXT NOT NULL,
                 bytes_rx INTEGER NOT NULL,
-                bytes_tx INTEGER NOT NULL
+                bytes_tx INTEGER NOT NULL,
+                PRIMARY KEY (ts, network_name)
             );
             CREATE TABLE IF NOT EXISTS network_days (
-                ts INTEGER PRIMARY KEY,
+                ts INTEGER,
+                network_name TEXT NOT NULL,
                 bytes_rx INTEGER NOT NULL,
-                bytes_tx INTEGER NOT NULL
+                bytes_tx INTEGER NOT NULL,
+                PRIMARY KEY (ts, network_name)
+            );
+            CREATE TABLE IF NOT EXISTS network_usage (
+                network_name TEXT PRIMARY KEY,
+                bytes_rx INTEGER NOT NULL DEFAULT 0,
+                bytes_tx INTEGER NOT NULL DEFAULT 0,
+                last_updated INTEGER NOT NULL
             );
         """)
+
+        if needsMigration {
+            try? db.execute(sql: """
+                BEGIN TRANSACTION;
+                INSERT INTO network_minutes (ts, network_name, bytes_rx, bytes_tx)
+                SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_minutes;
+                
+                INSERT INTO network_hours (ts, network_name, bytes_rx, bytes_tx)
+                SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_hours;
+                
+                INSERT INTO network_days (ts, network_name, bytes_rx, bytes_tx)
+                SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_days;
+                COMMIT;
+            """)
+            
+            try? db.execute(sql: "DROP TABLE IF EXISTS old_network_minutes;")
+            try? db.execute(sql: "DROP TABLE IF EXISTS old_network_hours;")
+            try? db.execute(sql: "DROP TABLE IF EXISTS old_network_days;")
+        }
 
         // Auto-migrate from JSONL if exists
         let jsonlURL = appDir.appending(path: "usage-events.jsonl")
@@ -180,17 +293,18 @@ actor UsageStore {
 
                         try db.execute(sql: "BEGIN TRANSACTION;")
                         let insertSql = """
-                        INSERT INTO network_minutes (ts, bytes_rx, bytes_tx)
-                        VALUES (?, ?, ?)
-                        ON CONFLICT(ts) DO UPDATE SET
+                        INSERT INTO network_minutes (ts, network_name, bytes_rx, bytes_tx)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(ts, network_name) DO UPDATE SET
                             bytes_rx = bytes_rx + excluded.bytes_rx,
                             bytes_tx = bytes_tx + excluded.bytes_tx;
                         """
                         for (ts, data) in minutes {
                             let stmt = try db.prepare(sql: insertSql)
                             try stmt.bind(index: 1, value: ts)
-                            try stmt.bind(index: 2, value: Int64(data.rx))
-                            try stmt.bind(index: 3, value: Int64(data.tx))
+                            try stmt.bind(index: 2, value: "Primary")
+                            try stmt.bind(index: 3, value: Int64(data.rx))
+                            try stmt.bind(index: 4, value: Int64(data.tx))
                             _ = stmt.step()
                         }
                         try db.execute(sql: "COMMIT;")
@@ -205,23 +319,45 @@ actor UsageStore {
 
     // MARK: – Write
 
-    func insertMinute(timestamp: Date, bytesReceived: UInt64, bytesSent: UInt64) throws {
+    func updateNetworkUsage(networkName: String, bytesReceived: UInt64, bytesSent: UInt64, timestamp: Date) throws {
+        let sql = """
+        INSERT INTO network_usage (network_name, bytes_rx, bytes_tx, last_updated)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(network_name) DO UPDATE SET
+            bytes_rx = bytes_rx + excluded.bytes_rx,
+            bytes_tx = bytes_tx + excluded.bytes_tx,
+            last_updated = excluded.last_updated;
+        """
+
+        let stmt = try database.prepare(sql: sql)
+        try stmt.bind(index: 1, value: networkName)
+        try stmt.bind(index: 2, value: Int64(bytesReceived))
+        try stmt.bind(index: 3, value: Int64(bytesSent))
+        try stmt.bind(index: 4, value: Int64(timestamp.timeIntervalSince1970))
+
+        if stmt.step() != SQLITE_DONE {
+            throw DatabaseError.executionFailed("Failed to update network usage")
+        }
+    }
+
+    func insertMinute(timestamp: Date, networkName: String, bytesReceived: UInt64, bytesSent: UInt64) throws {
         let cal = Calendar.current
         let minuteStart = cal.dateInterval(of: .minute, for: timestamp)?.start ?? timestamp
         let ts = Int64(minuteStart.timeIntervalSince1970)
 
         let sql = """
-        INSERT INTO network_minutes (ts, bytes_rx, bytes_tx)
-        VALUES (?, ?, ?)
-        ON CONFLICT(ts) DO UPDATE SET
+        INSERT INTO network_minutes (ts, network_name, bytes_rx, bytes_tx)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(ts, network_name) DO UPDATE SET
             bytes_rx = bytes_rx + excluded.bytes_rx,
             bytes_tx = bytes_tx + excluded.bytes_tx;
         """
 
         let stmt = try database.prepare(sql: sql)
         try stmt.bind(index: 1, value: ts)
-        try stmt.bind(index: 2, value: Int64(bytesReceived))
-        try stmt.bind(index: 3, value: Int64(bytesSent))
+        try stmt.bind(index: 2, value: networkName)
+        try stmt.bind(index: 3, value: Int64(bytesReceived))
+        try stmt.bind(index: 4, value: Int64(bytesSent))
 
         if stmt.step() != SQLITE_DONE {
             throw DatabaseError.executionFailed("Failed to insert minute row")
@@ -230,10 +366,9 @@ actor UsageStore {
 
     // MARK: – Read
 
-    func loadEvents(from startDate: Date, to endDate: Date) throws -> [UsageEvent] {
+    func loadTotals(from startDate: Date, to endDate: Date, networkName: String?) throws -> (rx: UInt64, tx: UInt64) {
         let cal = Calendar.current
 
-        // Expand query boundaries to align with the table resolutions to prevent data loss
         let minStart = cal.dateInterval(of: .minute, for: startDate)?.start ?? startDate
         let minEnd   = cal.dateInterval(of: .minute, for: endDate)?.end ?? endDate
 
@@ -252,23 +387,192 @@ actor UsageStore {
         let startDayTs = Int64(dayStart.timeIntervalSince1970)
         let endDayTs   = Int64(dayEnd.timeIntervalSince1970)
 
-        // Union minutes, hours, and days tables for the requested window
-        let sql = """
-        SELECT ts, bytes_rx, bytes_tx, 60 AS interval FROM network_minutes WHERE ts >= ? AND ts <= ?
-        UNION ALL
-        SELECT ts, bytes_rx, bytes_tx, 3600 AS interval FROM network_hours WHERE ts >= ? AND ts <= ?
-        UNION ALL
-        SELECT ts, bytes_rx, bytes_tx, 86400 AS interval FROM network_days WHERE ts >= ? AND ts <= ?
-        ORDER BY ts ASC;
-        """
+        let sql: String
+        if networkName != nil {
+            sql = """
+            SELECT SUM(bytes_rx), SUM(bytes_tx) FROM (
+                SELECT bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts <= ? AND network_name = ?
+                UNION ALL
+                SELECT bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts <= ? AND network_name = ?
+                UNION ALL
+                SELECT bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts <= ? AND network_name = ?
+            );
+            """
+        } else {
+            sql = """
+            SELECT SUM(bytes_rx), SUM(bytes_tx) FROM (
+                SELECT bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts <= ?
+                UNION ALL
+                SELECT bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts <= ?
+                UNION ALL
+                SELECT bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts <= ?
+            );
+            """
+        }
 
         let stmt = try database.prepare(sql: sql)
-        try stmt.bind(index: 1, value: startMinTs)
-        try stmt.bind(index: 2, value: endMinTs)
-        try stmt.bind(index: 3, value: startHourTs)
-        try stmt.bind(index: 4, value: endHourTs)
-        try stmt.bind(index: 5, value: startDayTs)
-        try stmt.bind(index: 6, value: endDayTs)
+        if let networkName {
+            try stmt.bind(index: 1, value: startMinTs)
+            try stmt.bind(index: 2, value: endMinTs)
+            try stmt.bind(index: 3, value: networkName)
+
+            try stmt.bind(index: 4, value: startHourTs)
+            try stmt.bind(index: 5, value: endHourTs)
+            try stmt.bind(index: 6, value: networkName)
+
+            try stmt.bind(index: 7, value: startDayTs)
+            try stmt.bind(index: 8, value: endDayTs)
+            try stmt.bind(index: 9, value: networkName)
+        } else {
+            try stmt.bind(index: 1, value: startMinTs)
+            try stmt.bind(index: 2, value: endMinTs)
+            try stmt.bind(index: 3, value: startHourTs)
+            try stmt.bind(index: 4, value: endHourTs)
+            try stmt.bind(index: 5, value: startDayTs)
+            try stmt.bind(index: 6, value: endDayTs)
+        }
+
+        if stmt.step() == SQLITE_ROW {
+            let rx = stmt.columnInt64(index: 0)
+            let tx = stmt.columnInt64(index: 1)
+            return (UInt64(rx), UInt64(tx))
+        }
+        return (0, 0)
+    }
+
+    func loadNetworkUsages(todayStart: Date, monthStart: Date) throws -> [NetworkUsageStats] {
+        let sqlUsage = "SELECT network_name, bytes_rx, bytes_tx, last_updated FROM network_usage;"
+        let stmtUsage = try database.prepare(sql: sqlUsage)
+        var usages: [String: (totalRx: UInt64, totalTx: UInt64, lastUpdated: Date)] = [:]
+        while stmtUsage.step() == SQLITE_ROW {
+            if let name = stmtUsage.columnText(index: 0) {
+                let rx = stmtUsage.columnInt64(index: 1)
+                let tx = stmtUsage.columnInt64(index: 2)
+                let ts = stmtUsage.columnInt64(index: 3)
+                usages[name] = (UInt64(rx), UInt64(tx), Date(timeIntervalSince1970: TimeInterval(ts)))
+            }
+        }
+
+        let todayTs = Int64(todayStart.timeIntervalSince1970)
+        let sqlToday = "SELECT network_name, SUM(bytes_rx), SUM(bytes_tx) FROM network_minutes WHERE ts >= ? GROUP BY network_name;"
+        let stmtToday = try database.prepare(sql: sqlToday)
+        try stmtToday.bind(index: 1, value: todayTs)
+        var todayStats: [String: (rx: UInt64, tx: UInt64)] = [:]
+        while stmtToday.step() == SQLITE_ROW {
+            if let name = stmtToday.columnText(index: 0) {
+                todayStats[name] = (UInt64(stmtToday.columnInt64(index: 1)), UInt64(stmtToday.columnInt64(index: 2)))
+            }
+        }
+
+        let monthTs = Int64(monthStart.timeIntervalSince1970)
+        let sqlMonth = """
+        SELECT network_name, SUM(bytes_rx), SUM(bytes_tx) FROM (
+            SELECT network_name, bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ?
+            UNION ALL
+            SELECT network_name, bytes_rx, bytes_tx FROM network_hours WHERE ts >= ?
+        ) GROUP BY network_name;
+        """
+        let stmtMonth = try database.prepare(sql: sqlMonth)
+        try stmtMonth.bind(index: 1, value: monthTs)
+        try stmtMonth.bind(index: 2, value: monthTs)
+        var monthStats: [String: (rx: UInt64, tx: UInt64)] = [:]
+        while stmtMonth.step() == SQLITE_ROW {
+            if let name = stmtMonth.columnText(index: 0) {
+                monthStats[name] = (UInt64(stmtMonth.columnInt64(index: 1)), UInt64(stmtMonth.columnInt64(index: 2)))
+            }
+        }
+
+        var result: [NetworkUsageStats] = []
+        for name in usages.keys {
+            let total = usages[name]!
+            let today = todayStats[name] ?? (0, 0)
+            let month = monthStats[name] ?? (0, 0)
+            result.append(NetworkUsageStats(
+                networkName: name,
+                todayRx: today.rx,
+                todayTx: today.tx,
+                monthRx: month.rx,
+                monthTx: month.tx,
+                totalRx: total.totalRx,
+                totalTx: total.totalTx,
+                lastUpdated: total.lastUpdated
+            ))
+        }
+
+        return result.sorted {
+            if $0.todayTotal != $1.todayTotal {
+                return $0.todayTotal > $1.todayTotal
+            }
+            if $0.monthTotal != $1.monthTotal {
+                return $0.monthTotal > $1.monthTotal
+            }
+            return $0.totalBytes > $1.totalBytes
+        }
+    }
+
+    func loadEvents(from startDate: Date, to endDate: Date, networkName: String?) throws -> [UsageEvent] {
+        let cal = Calendar.current
+
+        let minStart = cal.dateInterval(of: .minute, for: startDate)?.start ?? startDate
+        let minEnd   = cal.dateInterval(of: .minute, for: endDate)?.end ?? endDate
+
+        let hourStart = cal.dateInterval(of: .hour, for: startDate)?.start ?? startDate
+        let hourEnd   = cal.dateInterval(of: .hour, for: endDate)?.end ?? endDate
+
+        let dayStart = cal.startOfDay(for: startDate)
+        let dayEnd   = cal.dateInterval(of: .day, for: endDate)?.end ?? endDate
+
+        let startMinTs = Int64(minStart.timeIntervalSince1970)
+        let endMinTs   = Int64(minEnd.timeIntervalSince1970)
+
+        let startHourTs = Int64(hourStart.timeIntervalSince1970)
+        let endHourTs   = Int64(hourEnd.timeIntervalSince1970)
+
+        let startDayTs = Int64(dayStart.timeIntervalSince1970)
+        let endDayTs   = Int64(dayEnd.timeIntervalSince1970)
+
+        let sql: String
+        if networkName != nil {
+            sql = """
+            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 60 AS interval FROM network_minutes WHERE ts >= ? AND ts <= ? AND network_name = ? GROUP BY ts
+            UNION ALL
+            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 3600 AS interval FROM network_hours WHERE ts >= ? AND ts <= ? AND network_name = ? GROUP BY ts
+            UNION ALL
+            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 86400 AS interval FROM network_days WHERE ts >= ? AND ts <= ? AND network_name = ? GROUP BY ts
+            ORDER BY ts ASC;
+            """
+        } else {
+            sql = """
+            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 60 AS interval FROM network_minutes WHERE ts >= ? AND ts <= ? GROUP BY ts
+            UNION ALL
+            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 3600 AS interval FROM network_hours WHERE ts >= ? AND ts <= ? GROUP BY ts
+            UNION ALL
+            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 86400 AS interval FROM network_days WHERE ts >= ? AND ts <= ? GROUP BY ts
+            ORDER BY ts ASC;
+            """
+        }
+
+        let stmt = try database.prepare(sql: sql)
+        if let networkName {
+            try stmt.bind(index: 1, value: startMinTs)
+            try stmt.bind(index: 2, value: endMinTs)
+            try stmt.bind(index: 3, value: networkName)
+
+            try stmt.bind(index: 4, value: startHourTs)
+            try stmt.bind(index: 5, value: endHourTs)
+            try stmt.bind(index: 6, value: networkName)
+
+            try stmt.bind(index: 7, value: startDayTs)
+            try stmt.bind(index: 8, value: endDayTs)
+            try stmt.bind(index: 9, value: networkName)
+        } else {
+            try stmt.bind(index: 1, value: startMinTs)
+            try stmt.bind(index: 2, value: endMinTs)
+            try stmt.bind(index: 3, value: startHourTs)
+            try stmt.bind(index: 4, value: endHourTs)
+            try stmt.bind(index: 5, value: startDayTs)
+            try stmt.bind(index: 6, value: endDayTs)
+        }
 
         var events: [UsageEvent] = []
         while stmt.step() == SQLITE_ROW {
@@ -282,7 +586,8 @@ actor UsageStore {
                 timestamp: Date(timeIntervalSince1970: TimeInterval(ts)),
                 bytesReceived: UInt64(rx),
                 bytesSent: UInt64(tx),
-                intervalSeconds: TimeInterval(interval)
+                intervalSeconds: TimeInterval(interval),
+                networkName: networkName
             ))
         }
         return events
@@ -299,49 +604,50 @@ actor UsageStore {
     private func rollupMinutesToHours(olderThan limitDate: Date) throws {
         let limitTs = Int64(limitDate.timeIntervalSince1970)
 
-        // 1. Fetch minute rows older than 7 days
-        let fetchSql = "SELECT ts, bytes_rx, bytes_tx FROM network_minutes WHERE ts < ?;"
+        let fetchSql = "SELECT ts, network_name, bytes_rx, bytes_tx FROM network_minutes WHERE ts < ?;"
         let stmt = try database.prepare(sql: fetchSql)
         try stmt.bind(index: 1, value: limitTs)
 
-        var rawRows: [(ts: Int64, rx: Int64, tx: Int64)] = []
+        struct HourlyKey: Hashable {
+            let ts: Int64
+            let networkName: String
+        }
+
+        var rawRows: [HourlyKey: (rx: Int64, tx: Int64)] = [:]
+        let cal = Calendar.current
         while stmt.step() == SQLITE_ROW {
-            rawRows.append((
-                ts: stmt.columnInt64(index: 0),
-                rx: stmt.columnInt64(index: 1),
-                tx: stmt.columnInt64(index: 2)
-            ))
+            let ts = stmt.columnInt64(index: 0)
+            if let networkName = stmt.columnText(index: 1) {
+                let rx = stmt.columnInt64(index: 2)
+                let tx = stmt.columnInt64(index: 3)
+
+                let date = Date(timeIntervalSince1970: TimeInterval(ts))
+                let hourStart = cal.dateInterval(of: .hour, for: date)?.start ?? date
+                let hourTs = Int64(hourStart.timeIntervalSince1970)
+
+                let key = HourlyKey(ts: hourTs, networkName: networkName)
+                let current = rawRows[key] ?? (0, 0)
+                rawRows[key] = (current.0 + rx, current.1 + tx)
+            }
         }
 
         guard !rawRows.isEmpty else { return }
 
-        // 2. Group by hour boundary in local time
-        let cal = Calendar.current
-        var hourlyGroups: [Int64: (rx: Int64, tx: Int64)] = [:]
-        for row in rawRows {
-            let date = Date(timeIntervalSince1970: TimeInterval(row.ts))
-            let hourStart = cal.dateInterval(of: .hour, for: date)?.start ?? date
-            let hourTs = Int64(hourStart.timeIntervalSince1970)
-
-            let current = hourlyGroups[hourTs] ?? (0, 0)
-            hourlyGroups[hourTs] = (current.0 + row.rx, current.1 + row.tx)
-        }
-
-        // 3. Insert and delete in a single transaction
         try database.execute(sql: "BEGIN TRANSACTION;")
         do {
             let insertSql = """
-            INSERT INTO network_hours (ts, bytes_rx, bytes_tx)
-            VALUES (?, ?, ?)
-            ON CONFLICT(ts) DO UPDATE SET
+            INSERT INTO network_hours (ts, network_name, bytes_rx, bytes_tx)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(ts, network_name) DO UPDATE SET
                 bytes_rx = bytes_rx + excluded.bytes_rx,
                 bytes_tx = bytes_tx + excluded.bytes_tx;
             """
-            for (hourTs, data) in hourlyGroups {
+            for (key, data) in rawRows {
                 let insertStmt = try database.prepare(sql: insertSql)
-                try insertStmt.bind(index: 1, value: hourTs)
-                try insertStmt.bind(index: 2, value: data.rx)
-                try insertStmt.bind(index: 3, value: data.tx)
+                try insertStmt.bind(index: 1, value: key.ts)
+                try insertStmt.bind(index: 2, value: key.networkName)
+                try insertStmt.bind(index: 3, value: data.rx)
+                try insertStmt.bind(index: 4, value: data.tx)
                 if insertStmt.step() != SQLITE_DONE {
                     throw DatabaseError.executionFailed("Failed to insert rolled up hour")
                 }
@@ -364,49 +670,50 @@ actor UsageStore {
     private func rollupHoursToDays(olderThan limitDate: Date) throws {
         let limitTs = Int64(limitDate.timeIntervalSince1970)
 
-        // 1. Fetch hour rows older than 90 days
-        let fetchSql = "SELECT ts, bytes_rx, bytes_tx FROM network_hours WHERE ts < ?;"
+        let fetchSql = "SELECT ts, network_name, bytes_rx, bytes_tx FROM network_hours WHERE ts < ?;"
         let stmt = try database.prepare(sql: fetchSql)
         try stmt.bind(index: 1, value: limitTs)
 
-        var rawRows: [(ts: Int64, rx: Int64, tx: Int64)] = []
+        struct DailyKey: Hashable {
+            let ts: Int64
+            let networkName: String
+        }
+
+        var rawRows: [DailyKey: (rx: Int64, tx: Int64)] = [:]
+        let cal = Calendar.current
         while stmt.step() == SQLITE_ROW {
-            rawRows.append((
-                ts: stmt.columnInt64(index: 0),
-                rx: stmt.columnInt64(index: 1),
-                tx: stmt.columnInt64(index: 2)
-            ))
+            let ts = stmt.columnInt64(index: 0)
+            if let networkName = stmt.columnText(index: 1) {
+                let rx = stmt.columnInt64(index: 2)
+                let tx = stmt.columnInt64(index: 3)
+
+                let date = Date(timeIntervalSince1970: TimeInterval(ts))
+                let dayStart = cal.startOfDay(for: date)
+                let dayTs = Int64(dayStart.timeIntervalSince1970)
+
+                let key = DailyKey(ts: dayTs, networkName: networkName)
+                let current = rawRows[key] ?? (0, 0)
+                rawRows[key] = (current.0 + rx, current.1 + tx)
+            }
         }
 
         guard !rawRows.isEmpty else { return }
 
-        // 2. Group by day boundary in local time
-        let cal = Calendar.current
-        var dailyGroups: [Int64: (rx: Int64, tx: Int64)] = [:]
-        for row in rawRows {
-            let date = Date(timeIntervalSince1970: TimeInterval(row.ts))
-            let dayStart = cal.startOfDay(for: date)
-            let dayTs = Int64(dayStart.timeIntervalSince1970)
-
-            let current = dailyGroups[dayTs] ?? (0, 0)
-            dailyGroups[dayTs] = (current.0 + row.rx, current.1 + row.tx)
-        }
-
-        // 3. Insert and delete in a single transaction
         try database.execute(sql: "BEGIN TRANSACTION;")
         do {
             let insertSql = """
-            INSERT INTO network_days (ts, bytes_rx, bytes_tx)
-            VALUES (?, ?, ?)
-            ON CONFLICT(ts) DO UPDATE SET
+            INSERT INTO network_days (ts, network_name, bytes_rx, bytes_tx)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(ts, network_name) DO UPDATE SET
                 bytes_rx = bytes_rx + excluded.bytes_rx,
                 bytes_tx = bytes_tx + excluded.bytes_tx;
             """
-            for (dayTs, data) in dailyGroups {
+            for (key, data) in rawRows {
                 let insertStmt = try database.prepare(sql: insertSql)
-                try insertStmt.bind(index: 1, value: dayTs)
-                try insertStmt.bind(index: 2, value: data.rx)
-                try insertStmt.bind(index: 3, value: data.tx)
+                try insertStmt.bind(index: 1, value: key.ts)
+                try insertStmt.bind(index: 2, value: key.networkName)
+                try insertStmt.bind(index: 3, value: data.rx)
+                try insertStmt.bind(index: 4, value: data.tx)
                 if insertStmt.step() != SQLITE_DONE {
                     throw DatabaseError.executionFailed("Failed to insert rolled up day")
                 }

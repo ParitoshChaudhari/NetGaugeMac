@@ -19,6 +19,9 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Charts"),
+                .linkedFramework("CoreWLAN"),
+                .linkedFramework("CoreLocation"),
+                .linkedFramework("SystemConfiguration"),
                 .linkedLibrary("sqlite3")
             ]
         )

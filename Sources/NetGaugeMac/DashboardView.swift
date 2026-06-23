@@ -59,7 +59,10 @@ struct DashboardView: View {
                         chartSection
                         HStack(alignment: .top, spacing: 20) {
                             performancePanel
-                            interfacePanel
+                            VStack(spacing: 20) {
+                                interfacePanel
+                                networkUsagePanel
+                            }
                         }
                         captureFooter
                     }
@@ -136,21 +139,21 @@ struct DashboardView: View {
             // Right — three hero stat cards (mirrors reference image layout)
             HStack(alignment: .top, spacing: 40) {
                 HeroMetric(
-                    value: heroValue(model.todayTotal),
-                    unit:  heroUnit(model.todayTotal),
-                    label: "Total today",
-                    deltaValue: model.todayVsYesterdayPercent,
-                    deltaLabel: "vs yesterday"
+                    value: heroValue(model.rangeTotal),
+                    unit:  heroUnit(model.rangeTotal),
+                    label: model.selectedRange.heroTotalLabel,
+                    deltaValue: model.rangeVsPreviousPercent,
+                    deltaLabel: model.selectedRange.heroTotalDeltaLabel
                 )
 
                 ngSep.frame(width: 1, height: 70).padding(.top, 6)
 
                 HeroMetric(
-                    value: heroValue(model.peakHourTotal),
-                    unit:  heroUnit(model.peakHourTotal),
-                    label: "Peak hour",
+                    value: model.rangePeak > 0 ? heroValue(model.rangePeak) : "—",
+                    unit:  model.rangePeak > 0 ? heroUnit(model.rangePeak) : "",
+                    label: model.selectedRange.heroPeakLabel,
                     deltaValue: nil,
-                    deltaLabel: "highest hour today",
+                    deltaLabel: model.selectedRange.heroPeakDeltaLabel,
                     badge: "▲ Peak",
                     badgeColor: ngAccent
                 )
@@ -158,11 +161,11 @@ struct DashboardView: View {
                 ngSep.frame(width: 1, height: 70).padding(.top, 6)
 
                 HeroMetric(
-                    value: model.quietestHourTotal > 0 ? heroValue(model.quietestHourTotal) : "—",
-                    unit:  model.quietestHourTotal > 0 ? heroUnit(model.quietestHourTotal)  : "",
-                    label: "Quietest hour",
+                    value: model.rangeQuietest > 0 ? heroValue(model.rangeQuietest) : "—",
+                    unit:  model.rangeQuietest > 0 ? heroUnit(model.rangeQuietest)  : "",
+                    label: model.selectedRange.heroQuietestLabel,
                     deltaValue: nil,
-                    deltaLabel: "lowest hour today",
+                    deltaLabel: model.selectedRange.heroQuietestDeltaLabel,
                     badge: "▼ Low",
                     badgeColor: ngDownload
                 )
@@ -190,15 +193,16 @@ struct DashboardView: View {
             ngSep.frame(width: 1).padding(.vertical, 14)
 
             RateTile(icon: "clock.fill",
-                     title: "Today Total",
-                     value: model.todayTotal.byteString,
+                     title: model.selectedRange.rateStripSelectedTitle,
+                     value: model.rangeTotal.byteString,
                      color: ngText1)
 
             ngSep.frame(width: 1).padding(.vertical, 14)
 
-            RateTile(icon: "calendar",
-                     title: "This Month",
-                     value: model.monthTotal.byteString,
+            let isTodayOrYday = model.selectedRange == .today || model.selectedRange == .yesterday
+            RateTile(icon: isTodayOrYday ? "calendar" : "clock",
+                     title: model.selectedRange.rateStripAlternativeTitle,
+                     value: isTodayOrYday ? model.monthTotal.byteString : model.todayTotal.byteString,
                      color: ngAccent)
         }
         .padding(.vertical, 4)
@@ -222,6 +226,43 @@ struct DashboardView: View {
                 }
 
                 Spacer()
+
+                // Network Dropdown Picker
+                Menu {
+                    Button(action: { model.selectedNetwork = nil }) {
+                        HStack {
+                            Text("All Networks")
+                            if model.selectedNetwork == nil {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    ForEach(model.networkUsages) { stats in
+                        Button(action: { model.selectedNetwork = stats.networkName }) {
+                            HStack {
+                                Text(stats.networkName)
+                                if model.selectedNetwork == stats.networkName {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: model.selectedNetwork == nil ? "network" : "wifi.router")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(model.selectedNetwork ?? "All Networks")
+                            .font(.system(size: 12, weight: .medium))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .foregroundStyle(ngText1)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(ngBg)
+                    .clipShape(Capsule())
+                }
+                .menuStyle(.button)
 
                 // Mode pills: Both / Download / Upload
                 ChartModePicker(selected: $model.chartMode)
@@ -425,44 +466,44 @@ struct DashboardView: View {
                 spacing: 12
             ) {
                 MiniStatCard(
-                    label:    "Download today",
-                    sublabel: "Today's received data",
-                    value:    model.todayDownload.byteString,
-                    delta:    model.todayDownloadVsYesterdayPercent,
+                    label:    model.selectedRange.performanceDownloadLabel,
+                    sublabel: "Received in period",
+                    value:    model.rangeDownload.byteString,
+                    delta:    model.rangeDownloadVsPreviousPercent,
                     color:    ngDownload
                 )
                 MiniStatCard(
-                    label:    "Upload today",
-                    sublabel: "Today's sent data",
-                    value:    model.todayUpload.byteString,
-                    delta:    model.todayUploadVsYesterdayPercent,
+                    label:    model.selectedRange.performanceUploadLabel,
+                    sublabel: "Sent in period",
+                    value:    model.rangeUpload.byteString,
+                    delta:    model.rangeUploadVsPreviousPercent,
                     color:    ngUpload
                 )
                 MiniStatCard(
-                    label:    "Month total",
-                    sublabel: "This calendar month",
-                    value:    model.monthTotal.byteString,
-                    delta:    0,
+                    label:    model.selectedRange.performanceTotalLabel,
+                    sublabel: "Transferred in period",
+                    value:    model.rangeTotal.byteString,
+                    delta:    model.rangeVsPreviousPercent,
                     color:    ngAccent
                 )
                 MiniStatCard(
-                    label:    "Yesterday",
-                    sublabel: "Prior day total",
-                    value:    model.yesterdayTotal.byteString,
+                    label:    model.selectedRange.performancePreviousLabel,
+                    sublabel: "Prior period total",
+                    value:    model.previousTotal.byteString,
                     delta:    0,
                     color:    ngText2
                 )
                 MiniStatCard(
-                    label:    "Peak hour",
-                    sublabel: "Busiest hour today",
-                    value:    model.peakHourTotal > 0 ? model.peakHourTotal.byteString : "—",
+                    label:    model.selectedRange.heroPeakLabel,
+                    sublabel: "Busiest hour/day",
+                    value:    model.rangePeak > 0 ? model.rangePeak.byteString : "—",
                     delta:    0,
                     color:    ngAccent
                 )
                 MiniStatCard(
-                    label:    "Quietest hour",
-                    sublabel: "Lowest-traffic hour",
-                    value:    model.quietestHourTotal > 0 ? model.quietestHourTotal.byteString : "—",
+                    label:    model.selectedRange.heroQuietestLabel,
+                    sublabel: "Lowest-traffic hour/day",
+                    value:    model.rangeQuietest > 0 ? model.rangeQuietest.byteString : "—",
                     delta:    0,
                     color:    ngDownload
                 )
@@ -536,6 +577,73 @@ struct DashboardView: View {
                         .textSelection(.enabled)
                 }
                 .padding(.top, 12)
+            }
+        }
+        .padding(20)
+        .frame(width: 300)
+        .ngCard()
+    }
+
+    // MARK: – Network Usage Panel
+
+    private var networkUsagePanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Usage by Network")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(ngText1)
+                    Text("SSID & connection totals")
+                        .font(.caption)
+                        .foregroundStyle(ngText2)
+                }
+                Spacer()
+                Image(systemName: "wifi.router")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(ngText2)
+                    .padding(7)
+                    .background(ngBg)
+                    .clipShape(Circle())
+            }
+
+            ngSep.frame(height: 1)
+
+            if model.networkUsages.isEmpty {
+                VStack(spacing: 10) {
+                    Image(systemName: "wifi.slash")
+                        .font(.title2)
+                        .foregroundStyle(ngAccent)
+                    Text("No network data")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(ngText1)
+                    Text("Connect to a network to start tracking usage.")
+                        .font(.caption)
+                        .foregroundStyle(ngText2)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 24)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(Array(model.networkUsages.prefix(5).enumerated()), id: \.element.id) { idx, entry in
+                        Button(action: {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                if model.selectedNetwork == entry.networkName {
+                                    model.selectedNetwork = nil
+                                } else {
+                                    model.selectedNetwork = entry.networkName
+                                }
+                            }
+                        }) {
+                            NetworkUsageRow(entry: entry, isSelected: model.selectedNetwork == entry.networkName)
+                        }
+                        .buttonStyle(.plain)
+                        if idx < min(4, model.networkUsages.count - 1) {
+                            ngSep.frame(height: 1)
+                        }
+                    }
+                }
             }
         }
         .padding(20)
@@ -1079,6 +1187,92 @@ private struct InterfaceRateRow: View {
     }
 }
 
+// MARK: - Network Usage Row
+
+private struct NetworkUsageRow: View {
+    let entry: NetworkUsageStats
+    let isSelected: Bool
+
+    private var icon: String {
+        let name = entry.networkName.lowercased()
+        if name.contains("wi-fi") || name.contains("wifi") {
+            return "wifi"
+        } else if name.contains("iphone") || name.contains("hotspot") {
+            return "personalhotspot"
+        } else if name.contains("ethernet") || name.contains("lan") {
+            return "network"
+        } else if name.contains("vpn") || name.contains("tunnel") {
+            return "lock.shield"
+        }
+        return "antenna.radiowaves.left.and.right"
+    }
+
+    private var iconColor: Color {
+        let name = entry.networkName.lowercased()
+        if name.contains("wi-fi") || name.contains("wifi") {
+            return ngDownload
+        } else if name.contains("iphone") || name.contains("hotspot") {
+            return ngAccent
+        } else if name.contains("ethernet") || name.contains("lan") {
+            return ngUpload
+        }
+        return ngText2
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundStyle(isSelected ? .white : iconColor)
+                .frame(width: 32, height: 32)
+                .background(isSelected ? iconColor : iconColor.opacity(0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(entry.networkName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(isSelected ? ngAccent : ngText1)
+                    .lineLimit(1)
+                
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("TODAY")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(ngText2)
+                        Text(entry.todayTotal.byteString)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(isSelected ? ngText1 : ngDownload)
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("MONTH")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(ngText2)
+                        Text(entry.monthTotal.byteString)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(isSelected ? ngText1 : ngUpload)
+                    }
+                }
+            }
+
+            Spacer()
+
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(entry.totalBytes.byteString)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(ngText1)
+                Text("Total")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(ngText2)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+        .background(isSelected ? ngBg.opacity(0.7) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
 // MARK: - Private Extensions
 
 private extension DashboardRange {
@@ -1089,6 +1283,105 @@ private extension DashboardRange {
         case .thisMonth:  "1M"
         case .last30Days: "30D"
         case .custom:     "Custom"
+        }
+    }
+
+    var heroTotalLabel: String {
+        switch self {
+        case .today:      "Total today"
+        case .yesterday:  "Total yesterday"
+        case .thisMonth:  "Total this month"
+        case .last30Days: "Total last 30 days"
+        case .custom:     "Total in range"
+        }
+    }
+    
+    var heroTotalDeltaLabel: String {
+        switch self {
+        case .today:      "vs yesterday"
+        case .yesterday:  "vs day before"
+        case .thisMonth:  "vs previous month"
+        case .last30Days: "vs previous 30 days"
+        case .custom:     "vs previous period"
+        }
+    }
+    
+    var heroPeakLabel: String {
+        switch self {
+        case .today, .yesterday: "Peak hour"
+        default:                 "Peak period"
+        }
+    }
+    
+    var heroPeakDeltaLabel: String {
+        switch self {
+        case .today, .yesterday: "highest hour"
+        default:                 "highest period"
+        }
+    }
+    
+    var heroQuietestLabel: String {
+        switch self {
+        case .today, .yesterday: "Quietest hour"
+        default:                 "Quietest period"
+        }
+    }
+    
+    var heroQuietestDeltaLabel: String {
+        switch self {
+        case .today, .yesterday: "lowest hour"
+        default:                 "lowest period"
+        }
+    }
+
+    var rateStripSelectedTitle: String {
+        switch self {
+        case .today:      "Today Total"
+        case .yesterday:  "Yesterday Total"
+        case .thisMonth:  "Month Total"
+        case .last30Days: "30 Days Total"
+        case .custom:     "Selected Total"
+        }
+    }
+    
+    var rateStripAlternativeTitle: String {
+        switch self {
+        case .today, .yesterday: "This Month"
+        default:                 "Today Total"
+        }
+    }
+
+    var performanceDownloadLabel: String {
+        switch self {
+        case .today:      "Download today"
+        case .yesterday:  "Download yesterday"
+        default:          "Download selected"
+        }
+    }
+    
+    var performanceUploadLabel: String {
+        switch self {
+        case .today:      "Upload today"
+        case .yesterday:  "Upload yesterday"
+        default:          "Upload selected"
+        }
+    }
+    
+    var performanceTotalLabel: String {
+        switch self {
+        case .today:      "Total today"
+        case .yesterday:  "Total yesterday"
+        default:          "Selected Total"
+        }
+    }
+    
+    var performancePreviousLabel: String {
+        switch self {
+        case .today:      "Yesterday"
+        case .yesterday:  "Day before"
+        case .thisMonth:  "Prev. Month"
+        case .last30Days: "Prev. 30 Days"
+        case .custom:     "Prev. Period"
         }
     }
 }

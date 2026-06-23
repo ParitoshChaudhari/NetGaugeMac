@@ -1,6 +1,8 @@
 import Foundation
 import SwiftUI
 import ServiceManagement
+import CoreWLAN
+import SystemConfiguration
 
 // MARK: - Enums
 
@@ -32,6 +34,25 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var interfaceRates: [InterfaceRate] = []
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var storeError: String?
+    @Published private(set) var networkUsages: [NetworkUsageStats] = []
+    @Published var selectedNetwork: String? = nil {
+        didSet {
+            Task { await refreshEvents() }
+        }
+    }
+
+    // Range-aware metrics
+    @Published private(set) var rangeDownload: UInt64 = 0
+    @Published private(set) var rangeUpload: UInt64 = 0
+    @Published private(set) var rangeTotal: UInt64 = 0
+
+    @Published private(set) var previousDownload: UInt64 = 0
+    @Published private(set) var previousUpload: UInt64 = 0
+    @Published private(set) var previousTotal: UInt64 = 0
+
+    @Published private(set) var rangePeak: UInt64 = 0
+    @Published private(set) var rangeQuietest: UInt64 = 0
+
 
     @Published var selectedRange: DashboardRange = .today {
         didSet {
@@ -63,11 +84,19 @@ final class DashboardModel: ObservableObject {
     private var captureTask: Task<Void, Never>?
     private var inMemorySamples: [UsageEvent] = []
     private var lastRollupTime: Date = Date()
+    private var todayEvents: [UsageEvent] = []
+    private var yesterdayDownload: UInt64 = 0
+    private var yesterdayUpload: UInt64 = 0
+    private var monthTotalValue: UInt64 = 0
+    private var networkUsageDeltas: [String: (rx: UInt64, tx: UInt64)] = [:]
 
     // MARK: – Lifecycle
 
     func start() async {
         guard captureTask == nil else { return }
+
+        // Request Location permission so we can read Wi-Fi SSID
+        LocationHelper.shared.requestPermission()
 
         do {
             let newStore = try UsageStore()
@@ -98,17 +127,135 @@ final class DashboardModel: ObservableObject {
     func refreshEvents() async {
         guard let store else { return }
         let interval = selectedInterval
+        let todayInt = fixedInterval(for: .today)
+        let monthInt = fixedInterval(for: .thisMonth)
         do {
-            // Load historical events from SQLite
-            let dbEvents = try await store.loadEvents(from: interval.start, to: interval.end)
-
-            // Filter in-memory 1-second samples that fall within the selected interval
+            // Load historical events from SQLite for the chart
+            let dbEvents = try await store.loadEvents(from: interval.start, to: interval.end, networkName: selectedNetwork)
             let memoryEvents = inMemorySamples.filter {
-                $0.timestamp >= interval.start && $0.timestamp <= interval.end
+                $0.timestamp >= interval.start && $0.timestamp <= interval.end &&
+                (selectedNetwork == nil || $0.networkName == selectedNetwork)
+            }
+            self.events = dbEvents + memoryEvents
+
+            // Load range-specific metrics
+            self.rangeDownload = self.events.reduce(0) { $0 + $1.bytesReceived }
+            self.rangeUpload = self.events.reduce(0) { $0 + $1.bytesSent }
+            self.rangeTotal = self.rangeDownload + self.rangeUpload
+
+            // Load previous period metrics for percentage calculation
+            let prevInt = previousInterval
+            let prevDb = try await store.loadTotals(from: prevInt.start, to: prevInt.end, networkName: selectedNetwork)
+            let prevMem = inMemorySamples.filter {
+                $0.timestamp >= prevInt.start && $0.timestamp <= prevInt.end &&
+                (selectedNetwork == nil || $0.networkName == selectedNetwork)
+            }
+            self.previousDownload = prevDb.rx + prevMem.reduce(0) { $0 + $1.bytesReceived }
+            self.previousUpload = prevDb.tx + prevMem.reduce(0) { $0 + $1.bytesSent }
+            self.previousTotal = self.previousDownload + self.previousUpload
+
+            // Load peak and quietest periods in selected range
+            let buckets = bucketsForSelectedRange()
+            self.rangePeak = buckets.map(\.total).max() ?? 0
+            self.rangeQuietest = buckets.filter { $0.total > 0 }.map(\.total).min() ?? 0
+
+            // Load Today's events to compute Today's extremes and totals
+            let dbToday = try await store.loadEvents(from: todayInt.start, to: todayInt.end, networkName: selectedNetwork)
+            let memoryToday = inMemorySamples.filter {
+                $0.timestamp >= todayInt.start && $0.timestamp <= todayInt.end &&
+                (selectedNetwork == nil || $0.networkName == selectedNetwork)
+            }
+            self.todayEvents = dbToday + memoryToday
+
+            // Load Yesterday's totals
+            let ydayInt = fixedInterval(for: .yesterday)
+            let ydayDb = try await store.loadTotals(from: ydayInt.start, to: ydayInt.end, networkName: selectedNetwork)
+            let ydayMem = inMemorySamples.filter {
+                $0.timestamp >= ydayInt.start && $0.timestamp <= ydayInt.end &&
+                (selectedNetwork == nil || $0.networkName == selectedNetwork)
+            }
+            let ydayMemRx = ydayMem.reduce(0) { $0 + $1.bytesReceived }
+            let ydayMemTx = ydayMem.reduce(0) { $0 + $1.bytesSent }
+            self.yesterdayDownload = ydayDb.rx + ydayMemRx
+            self.yesterdayUpload = ydayDb.tx + ydayMemTx
+
+            // Load This Month's totals
+            let monthDb = try await store.loadTotals(from: monthInt.start, to: monthInt.end, networkName: selectedNetwork)
+            let monthMem = inMemorySamples.filter {
+                $0.timestamp >= monthInt.start && $0.timestamp <= monthInt.end &&
+                (selectedNetwork == nil || $0.networkName == selectedNetwork)
+            }
+            let monthMemRx = monthMem.reduce(0) { $0 + $1.bytesReceived }
+            let monthMemTx = monthMem.reduce(0) { $0 + $1.bytesSent }
+            self.monthTotalValue = monthDb.rx + monthDb.tx + monthMemRx + monthMemTx
+
+            // Load Network Usages
+            var dbNetworkUsages = try await store.loadNetworkUsages(todayStart: todayInt.start, monthStart: monthInt.start)
+
+            // Apply in-memory samples for each network
+            for i in 0..<dbNetworkUsages.count {
+                let name = dbNetworkUsages[i].networkName
+                
+                let tMem = inMemorySamples.filter { $0.timestamp >= todayInt.start && $0.timestamp <= todayInt.end && $0.networkName == name }
+                let tMemRx = tMem.reduce(0) { $0 + $1.bytesReceived }
+                let tMemTx = tMem.reduce(0) { $0 + $1.bytesSent }
+                
+                let mMem = inMemorySamples.filter { $0.timestamp >= monthInt.start && $0.timestamp <= monthInt.end && $0.networkName == name }
+                let mMemRx = mMem.reduce(0) { $0 + $1.bytesReceived }
+                let mMemTx = mMem.reduce(0) { $0 + $1.bytesSent }
+                
+                let totalMemRx = networkUsageDeltas[name]?.rx ?? 0
+                let totalMemTx = networkUsageDeltas[name]?.tx ?? 0
+                
+                dbNetworkUsages[i] = NetworkUsageStats(
+                    networkName: name,
+                    todayRx: dbNetworkUsages[i].todayRx + tMemRx,
+                    todayTx: dbNetworkUsages[i].todayTx + tMemTx,
+                    monthRx: dbNetworkUsages[i].monthRx + mMemRx,
+                    monthTx: dbNetworkUsages[i].monthTx + mMemTx,
+                    totalRx: dbNetworkUsages[i].totalRx + totalMemRx,
+                    totalTx: dbNetworkUsages[i].totalTx + totalMemTx,
+                    lastUpdated: max(dbNetworkUsages[i].lastUpdated, tMem.last?.timestamp ?? dbNetworkUsages[i].lastUpdated)
+                )
             }
 
-            // Combine and update UI state
-            self.events = dbEvents + memoryEvents
+            // Capture newly connected interfaces that only have in-memory data
+            let allNetworkNames = Set(dbNetworkUsages.map { $0.networkName }).union(inMemorySamples.compactMap { $0.networkName }).union(networkUsageDeltas.keys)
+            for name in allNetworkNames {
+                if !dbNetworkUsages.contains(where: { $0.networkName == name }) {
+                    let tMem = inMemorySamples.filter { $0.timestamp >= todayInt.start && $0.timestamp <= todayInt.end && $0.networkName == name }
+                    let tMemRx = tMem.reduce(0) { $0 + $1.bytesReceived }
+                    let tMemTx = tMem.reduce(0) { $0 + $1.bytesSent }
+                    
+                    let mMem = inMemorySamples.filter { $0.timestamp >= monthInt.start && $0.timestamp <= monthInt.end && $0.networkName == name }
+                    let mMemRx = mMem.reduce(0) { $0 + $1.bytesReceived }
+                    let mMemTx = mMem.reduce(0) { $0 + $1.bytesSent }
+                    
+                    let totalMemRx = networkUsageDeltas[name]?.rx ?? 0
+                    let totalMemTx = networkUsageDeltas[name]?.tx ?? 0
+                    
+                    dbNetworkUsages.append(NetworkUsageStats(
+                        networkName: name,
+                        todayRx: tMemRx,
+                        todayTx: tMemTx,
+                        monthRx: mMemRx,
+                        monthTx: mMemTx,
+                        totalRx: totalMemRx,
+                        totalTx: totalMemTx,
+                        lastUpdated: tMem.last?.timestamp ?? Date()
+                    ))
+                }
+            }
+
+            self.networkUsages = dbNetworkUsages.sorted {
+                if $0.todayTotal != $1.todayTotal {
+                    return $0.todayTotal > $1.todayTotal
+                }
+                if $0.monthTotal != $1.monthTotal {
+                    return $0.monthTotal > $1.monthTotal
+                }
+                return $0.totalBytes > $1.totalBytes
+            }
         } catch {
             storeError = error.localizedDescription
         }
@@ -125,19 +272,17 @@ final class DashboardModel: ObservableObject {
 
     // MARK: – Today metrics
 
-    var todayTotal: UInt64    { sumEvents(in: .today, keyPath: \.totalBytes) }
-    var todayDownload: UInt64 { sumEvents(in: .today, keyPath: \.bytesReceived) }
-    var todayUpload: UInt64   { sumEvents(in: .today, keyPath: \.bytesSent) }
+    var todayTotal: UInt64    { todayEvents.reduce(0) { $0 + $1.totalBytes } }
+    var todayDownload: UInt64 { todayEvents.reduce(0) { $0 + $1.bytesReceived } }
+    var todayUpload: UInt64   { todayEvents.reduce(0) { $0 + $1.bytesSent } }
 
     // MARK: – Month metric
 
-    var monthTotal: UInt64 { sumEvents(in: .thisMonth, keyPath: \.totalBytes) }
+    var monthTotal: UInt64 { monthTotalValue }
 
     // MARK: – Yesterday metrics
 
-    var yesterdayTotal: UInt64    { sumEvents(in: .yesterday, keyPath: \.totalBytes) }
-    var yesterdayDownload: UInt64 { sumEvents(in: .yesterday, keyPath: \.bytesReceived) }
-    var yesterdayUpload: UInt64   { sumEvents(in: .yesterday, keyPath: \.bytesSent) }
+    var yesterdayTotal: UInt64    { yesterdayDownload + yesterdayUpload }
 
     // MARK: – Hourly extremes (today)
 
@@ -161,6 +306,18 @@ final class DashboardModel: ObservableObject {
     var todayDownloadVsYesterdayPercent: Int  { percentDelta(current: todayDownload, previous: yesterdayDownload) }
     var todayUploadVsYesterdayPercent: Int    { percentDelta(current: todayUpload,   previous: yesterdayUpload) }
 
+    // MARK: – Delta percentages vs. previous period
+
+    var rangeVsPreviousPercent: Int {
+        percentDelta(current: rangeTotal, previous: previousTotal)
+    }
+    var rangeDownloadVsPreviousPercent: Int {
+        percentDelta(current: rangeDownload, previous: previousDownload)
+    }
+    var rangeUploadVsPreviousPercent: Int {
+        percentDelta(current: rangeUpload, previous: previousUpload)
+    }
+
     // MARK: – Selected interval
 
     var selectedInterval: DateInterval {
@@ -170,6 +327,13 @@ final class DashboardModel: ObservableObject {
             return DateInterval(start: s, end: e)
         }
         return fixedInterval(for: selectedRange)
+    }
+
+    var previousInterval: DateInterval {
+        let current = selectedInterval
+        let duration = current.duration
+        let start = current.start.addingTimeInterval(-duration)
+        return DateInterval(start: start, end: current.start)
     }
 
     // MARK: – Private helpers
@@ -227,17 +391,30 @@ final class DashboardModel: ObservableObject {
                 AppDelegate.shared?.updateStatusItemText(download: dl, upload: ul)
             }
 
+            // Accumulate delta bytes per network interface
+            let prevByID = Dictionary(uniqueKeysWithValues: previous.interfaces.map { ($0.id, $0) })
+            for cur in snapshot.interfaces {
+                if let prev = prevByID[cur.id] {
+                    let rx = safeDelta(cur.bytesReceived, prev.bytesReceived)
+                    let tx = safeDelta(cur.bytesSent, prev.bytesSent)
+                    if rx > 0 || tx > 0 {
+                        let netName = getNetworkName(for: cur.name)
+                        let currentAccum = networkUsageDeltas[netName] ?? (0, 0)
+                        networkUsageDeltas[netName] = (currentAccum.0 + rx, currentAccum.1 + tx)
 
-
-            let event = UsageEvent(
-                id: UUID(),
-                timestamp: snapshot.capturedAt,
-                bytesReceived: rxDelta,
-                bytesSent: txDelta,
-                intervalSeconds: elapsed
-            )
-
-            inMemorySamples.append(event)
+                        // Append an in-memory sample for this network interface
+                        let event = UsageEvent(
+                            id: UUID(),
+                            timestamp: snapshot.capturedAt,
+                            bytesReceived: rx,
+                            bytesSent: tx,
+                            intervalSeconds: elapsed,
+                            networkName: netName
+                        )
+                        inMemorySamples.append(event)
+                    }
+                }
+            }
 
             // Flush database on minute boundary rollover
             let cal = Calendar.current
@@ -247,22 +424,42 @@ final class DashboardModel: ObservableObject {
             let toKeep = inMemorySamples.filter { $0.timestamp >= currentMinuteStart }
 
             if !toFlush.isEmpty {
-                let grouped = Dictionary(grouping: toFlush) { e in
-                    cal.dateInterval(of: .minute, for: e.timestamp)?.start ?? e.timestamp
+                // Group by timestamp and network name!
+                struct GroupKey: Hashable {
+                    let minStart: Date
+                    let networkName: String
+                }
+                
+                var grouped: [GroupKey: (rx: UInt64, tx: UInt64)] = [:]
+                for e in toFlush {
+                    let minStart = cal.dateInterval(of: .minute, for: e.timestamp)?.start ?? e.timestamp
+                    let netName = e.networkName ?? "Primary"
+                    let key = GroupKey(minStart: minStart, networkName: netName)
+                    let current = grouped[key] ?? (0, 0)
+                    grouped[key] = (current.0 + e.bytesReceived, current.1 + e.bytesSent)
                 }
 
-                for (minStart, minuteEvents) in grouped {
-                    let totalRx = minuteEvents.reduce(0) { $0 + $1.bytesReceived }
-                    let totalTx = minuteEvents.reduce(0) { $0 + $1.bytesSent }
-
+                for (key, data) in grouped {
                     if let store {
                         do {
-                            try await store.insertMinute(timestamp: minStart, bytesReceived: totalRx, bytesSent: totalTx)
+                            try await store.insertMinute(timestamp: key.minStart, networkName: key.networkName, bytesReceived: data.rx, bytesSent: data.tx)
                         } catch {
                             storeError = error.localizedDescription
                         }
                     }
                 }
+
+                // Flush network-specific usage deltas
+                if let store = store {
+                    for (netName, data) in networkUsageDeltas {
+                        do {
+                            try await store.updateNetworkUsage(networkName: netName, bytesReceived: data.rx, bytesSent: data.tx, timestamp: snapshot.capturedAt)
+                        } catch {
+                            storeError = error.localizedDescription
+                        }
+                    }
+                }
+                networkUsageDeltas.removeAll()
 
                 inMemorySamples = toKeep
             }
@@ -297,6 +494,17 @@ final class DashboardModel: ObservableObject {
             guard let prev = prevByID[cur.id] else { return nil }
             let dl = Double(safeDelta(cur.bytesReceived, prev.bytesReceived)) / elapsed
             let ul = Double(safeDelta(cur.bytesSent,    prev.bytesSent))    / elapsed
+            
+            // Only show interfaces if:
+            // 1. It is a Wi-Fi or Ethernet interface (name hasPrefix "en")
+            // 2. OR it has active traffic (dl > 0 or ul > 0)
+            let isWifiOrEthernet = cur.name.hasPrefix("en")
+            let hasActiveTraffic = dl > 0 || ul > 0
+            
+            guard isWifiOrEthernet || hasActiveTraffic else {
+                return nil
+            }
+            
             return InterfaceRate(
                 id: cur.id,
                 name: cur.name,
@@ -358,6 +566,58 @@ final class DashboardModel: ObservableObject {
             } catch {
                 print("Failed to toggle login item status: \(error)")
             }
+        }
+    }
+
+    private func getNetworkName(for interfaceName: String) -> String {
+        var displayName = interfaceName
+        var isWifi = false
+
+        if let interfaces = SCNetworkInterfaceCopyAll() as? [SCNetworkInterface] {
+            for interface in interfaces {
+                if let bsdName = SCNetworkInterfaceGetBSDName(interface) as String?,
+                   bsdName == interfaceName {
+                    if let disp = SCNetworkInterfaceGetLocalizedDisplayName(interface) as String? {
+                        displayName = disp
+                    }
+                    if let type = SCNetworkInterfaceGetInterfaceType(interface) as String?,
+                       type == (kSCNetworkInterfaceTypeIEEE80211 as String) {
+                        isWifi = true
+                    }
+                    break
+                }
+            }
+        }
+
+        if isWifi || displayName == "Wi-Fi" {
+            if let ssid = CWWiFiClient.shared().interface()?.ssid(), !ssid.isEmpty {
+                return "Wi-Fi: \(ssid)"
+            } else {
+                return "Wi-Fi"
+            }
+        }
+
+        return displayName
+    }
+}
+
+// MARK: - Location Services Helper
+import CoreLocation
+
+@MainActor
+final class LocationHelper: NSObject, CLLocationManagerDelegate {
+    static let shared = LocationHelper()
+    private let manager = CLLocationManager()
+
+    override init() {
+        super.init()
+        manager.delegate = self
+    }
+
+    func requestPermission() {
+        let status = manager.authorizationStatus
+        if status == .notDetermined {
+            manager.requestWhenInUseAuthorization()
         }
     }
 }
