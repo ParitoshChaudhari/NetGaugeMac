@@ -30,9 +30,22 @@
   - Enforced exclusive upper bounds `ts >= startTs AND ts < endTs` across all queries.
   - Wrapped `UNION ALL` statements in subquery for global `ORDER BY ts ASC`.
 
-### 4. Apple App Sandbox Compliance
-- **Entitlements**: `com.apple.security.app-sandbox`, `com.apple.security.network.client`, `com.apple.security.network.server`, `com.apple.security.personal-information.location`.
-- **Container Auto-Migration**: Automatically copies pre-existing unsandboxed SQLite databases into `~/Library/Containers/com.paritoshchaudhari.NetGaugeMac/Data/Library/Application Support/NetGaugeMac/`.
+### 5. Settings Tab & Data Reset ("Clear All Data")
+- **Feature**: Added a dedicated Settings tab with General Preferences, Location Status, Database Path info, and a Danger Zone "Clear All Data" button.
+- **Confirmation Warning**: Prompts the user with a native macOS warning alert:
+  > *Clear All Network Data? This will permanently delete all recorded network speed and usage history and reset NetGauge to its fresh install state. This action cannot be undone.*
+- **Reset Mechanism**:
+  - Truncates all SQLite tables (`network_minutes`, `network_hours`, `network_days`, `network_usage`) and runs `VACUUM`.
+  - Clears all in-memory buffers (`inMemorySamples`, `networkUsageDeltas`, `ssidCache`, `interfaceRates`).
+  - Resets kernel snapshot baselines so new traffic accumulates from zero.
+
+### 6. macOS 26 SwiftUI `LocalizedStringKey` Format String Crash
+- **Issue**: App crashed with `__CF_IS_OBJC(0x0)` / `__CFStringAppendFormatCore` null pointer when rendering dynamic strings containing `%`, `/`, or date formats.
+- **Solution**: Explicitly initialized all dynamic text views using `Text(verbatim:)` across `HeroMetric`, `RateTile`, `MiniStatCard`, `InterfaceRateRow`, `NetworkUsageRow`, `ChartTooltipCard`, `TooltipRow`, and date footers.
+
+### 7. CoreLocation API & SSID Disambiguation
+- **Issue**: macOS Location permission request failed due to using iOS-only `requestAlwaysAuthorization()`.
+- **Solution**: Switched to `requestWhenInUseAuthorization()`. Added `"Wi-Fi (interfaceName)"` fallback so unresolvable SSIDs stay separated by physical adapter instead of collapsing into a single `"Wi-Fi"` row. Added a 30-second SSID lookup cache to eliminate main thread IPC latency.
 
 ---
 

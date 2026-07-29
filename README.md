@@ -14,9 +14,12 @@ The application is built on top of Apple's developer guidelines (HIG) using Swif
   * **Hero Cards**: Displays total, peak, and quietest periods calculated specifically for the selected date range.
   * **Dynamic Comparison Deltas**: Automatically calculates percentage gains/losses against relative prior periods (e.g., Yesterday compares vs the day before yesterday; Last 30 Days compares vs the prior 30-day window).
   * **Rate Strip**: Displays selected range totals alongside appropriate reference totals (e.g., showing Selected Total and Today Total when viewing 30D).
+* **Dedicated Settings & Preferences Tab**: Integrated top navigation tab bar (`[ 📊 Dashboard ]  [ ⚙️ Settings ]`) and status menu `Settings...` shortcut (`Cmd+,`) for easy access to configuration.
+* **Complete App Reset & "Clear All Data"**: Reset option inside Settings to wipe all SQLite usage history (`network_minutes`, `network_hours`, `network_days`, `network_usage`), clear in-memory buffers, and reset kernel baselines back to fresh install state, guarded by a native macOS warning confirmation dialog.
 * **Granular SSID & Connection Tracking**:
   * Resolves physical interface counters (like `en0`) into logical networks (e.g. `"Wi-Fi: MySSID"`, `"iPhone USB Hotspot"`, `"Ethernet"`).
   * Integrates with Location Services (`CLLocationManager`) to securely read Wi-Fi SSIDs on macOS Sonoma and later.
+  * Disambiguates unresolvable Wi-Fi interfaces as `"Wi-Fi (en0)"` so separate physical network adapters maintain distinct database history.
   * REDESIGNED **"Usage by Network"** list displaying Today usage, Month usage, and Cumulative totals side-by-side.
 * **Interactive Network Filtering**: Clicking any network card or choosing a network from the chart dropdown focuses all dashboard charts, totals, peak metrics, and performance grids on that network.
 * **Clean Active Interfaces View**: Automatically filters out inactive virtual interfaces (e.g. idle `awdl`, `bridge`, `anpi` showing 0 B/s), keeping the panel focused on active connections and primary adapters.

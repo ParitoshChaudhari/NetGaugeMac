@@ -1,5 +1,22 @@
 # NetGaugeMac — Version History & Changelog
 
+## [1.0.3] - 2026-07-29
+
+### Added
+- **Settings Tab**: Added a dedicated Settings tab accessible via top navigation bar or status bar menu (`Settings...` / `Cmd+,`).
+- **Clear All Data Feature**: Introduced a data reset action in Settings that truncates all SQLite tables (`network_minutes`, `network_hours`, `network_days`, `network_usage`), clears in-memory buffers, resets kernel sampling baselines, and presents a native macOS confirmation warning dialog.
+- **SSID Caching**: Added 30-second per-interface SSID caching to eliminate per-second `CoreWLAN` / `SystemConfiguration` IPC query overhead.
+- **Graceful Shutdown Data Flushing**: Wired `flushPendingData()` into `applicationShouldTerminate` (`.terminateLater`) to guarantee no sub-minute traffic data is lost when quitting.
+
+### Fixed
+- **macOS 26 SwiftUI Format String Crash**: Replaced dynamic `Text()` interpolations with `Text(verbatim:)` across all components (`HeroMetric`, `RateTile`, `MiniStatCard`, `InterfaceRateRow`, `NetworkUsageRow`, `ChartTooltipCard`, `TooltipRow`, and date footers) to prevent `LocalizedStringKey` null-pointer crashes.
+- **macOS Location Authorization API**: Replaced iOS-only `requestAlwaysAuthorization()` with `requestWhenInUseAuthorization()` and removed macOS-unavailable `authorizedWhenInUse` case.
+- **WiFi Interface Disambiguation**: Added `"Wi-Fi (interfaceName)"` fallback so distinct physical adapters remain separate database rows even if location access is unavailable.
+- **Today Stats Rollup Bug**: Fixed `loadNetworkUsages()` today query by using `UNION ALL` across `network_minutes`, `network_hours`, and `network_days` to prevent metrics from disappearing after rollups.
+- **Double/UInt64 Overflow Safety**: Added `isFinite` and `Int64.max` clamping to `speedString` and `byteString` formatters to prevent numeric overflow crashes.
+
+---
+
 ## [1.0.2] - 2026-07-29
 
 ### Added
