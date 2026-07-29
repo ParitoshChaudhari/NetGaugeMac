@@ -8,14 +8,12 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        .executable(name: "NetGaugeMac", targets: ["NetGaugeMac"])
+        .executable(name: "NetGaugeMac", targets: ["NetGaugeMac"]),
+        .executable(name: "NetGaugeMacTestRunner", targets: ["NetGaugeMacTestRunner"])
     ],
     targets: [
         .executableTarget(
             name: "NetGaugeMac",
-            resources: [
-                .process("AppIcon.png")   // logo bundled with the app
-            ],
             linkerSettings: [
                 .linkedFramework("SwiftUI"),
                 .linkedFramework("Charts"),
@@ -23,6 +21,13 @@ let package = Package(
                 .linkedFramework("CoreLocation"),
                 .linkedFramework("SystemConfiguration"),
                 .linkedLibrary("sqlite3")
+            ]
+        ),
+        .executableTarget(
+            name: "NetGaugeMacTestRunner",
+            linkerSettings: [
+                .linkedFramework("CoreWLAN"),
+                .linkedFramework("CoreLocation")
             ]
         )
     ]

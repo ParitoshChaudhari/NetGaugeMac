@@ -76,13 +76,23 @@ final class NetworkSampler: Sendable {
             totalReceived = totalReceived.saturatingAdd(ifReceived)
             totalSent     = totalSent.saturatingAdd(ifSent)
 
-            interfaceTotals[name] = InterfaceSnapshot(
-                id: name,
-                name: name,
-                displayName: displayName(for: name),
-                bytesReceived: ifReceived,
-                bytesSent: ifSent
-            )
+            if let existing = interfaceTotals[name] {
+                interfaceTotals[name] = InterfaceSnapshot(
+                    id: name,
+                    name: name,
+                    displayName: existing.displayName,
+                    bytesReceived: existing.bytesReceived.saturatingAdd(ifReceived),
+                    bytesSent: existing.bytesSent.saturatingAdd(ifSent)
+                )
+            } else {
+                interfaceTotals[name] = InterfaceSnapshot(
+                    id: name,
+                    name: name,
+                    displayName: displayName(for: name),
+                    bytesReceived: ifReceived,
+                    bytesSent: ifSent
+                )
+            }
         }
 
         return NetworkSnapshot(

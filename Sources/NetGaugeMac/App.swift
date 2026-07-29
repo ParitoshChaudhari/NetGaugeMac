@@ -30,7 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Self.shared = self
 
         // Set dynamic application icon
-        if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
            let image = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = image
         }
@@ -142,6 +142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             defer: false
         )
         window.center()
+        window.setFrameAutosaveName("NetGaugeDashboard")
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.title = "NetGauge"
@@ -217,7 +218,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc func showAboutPanel() {
         let logo: NSImage
-        if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
            let img = NSImage(contentsOf: url) {
             logo = img
         } else {
@@ -246,7 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .applicationIcon: logo,
             .credits: credits,
             .applicationName: "NetGauge",
-            .version: "1.0.0"
+            .version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
         ]
 
         NSApplication.shared.orderFrontStandardAboutPanel(options: options)

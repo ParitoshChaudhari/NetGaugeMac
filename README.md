@@ -38,6 +38,7 @@ The application is built on top of Apple's developer guidelines (HIG) using Swif
 - **Frameworks**: SwiftUI, AppKit, Charts, CoreWLAN, CoreLocation, SystemConfiguration, ServiceManagement
 - **Database**: SQLite3 (native libsqlite3 system library, zero-dependency)
 - **Minimum OS**: macOS 14 Sonoma (uses modern `SMAppService` and Swift Charts APIs)
+- **Security**: Apple App Sandbox (`com.apple.security.app-sandbox`) with Network Client, Network Server, Location, and User File privileges
 
 ---
 
@@ -46,27 +47,62 @@ The application is built on top of Apple's developer guidelines (HIG) using Swif
 * [App.swift](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/App.swift): Main application entry point, status menu item setup, multiline speed renderer, close button event interception, custom About panel, and boot startup heuristics.
 * [DashboardModel.swift](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/DashboardModel.swift): `@MainActor` state manager, 1-second capture loop, in-memory buffers, interface bandwidth rate logic, and `SMAppService` toggle bindings.
 * [DashboardView.swift](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/DashboardView.swift): SwiftUI dashboard view, custom design system tokens, 45-degree rotated X-axis labels, dropdown network filter, and interactive network cards.
-* [UsageStore.swift](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/UsageStore.swift): Serial actor-isolated raw `sqlite3` database engine, schema migration scripts, composite-key aggregation, and timezone-aligned rollup jobs.
+* [UsageStore.swift](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/UsageStore.swift): Serial actor-isolated raw `sqlite3` database engine, schema migration scripts, sandboxed container migration, composite-key aggregation, and timezone-aligned rollup jobs.
 * [NetworkSampler.swift](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/NetworkSampler.swift): Stateless network byte counters queried from Kernel BSD `getifaddrs` API.
+* [NetGaugeMac.entitlements](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Sources/NetGaugeMac/NetGaugeMac.entitlements): Apple App Sandbox entitlements configuration.
+
+---
+
+## Documentation & Version History
+
+All audit reports, test scenarios, fix summaries, and version logs are tracked in the [Docs](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Docs) directory:
+
+- 📄 [netgauge_test_report.md](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Docs/netgauge_test_report.md): Real-world test scenarios, identified issues, and verification results.
+- 📜 [version_history.md](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Docs/version_history.md): Full version log tracking v1.0.0 through v1.0.2 (App Sandbox, SSID resolution, and bug fixes).
+- 🛠️ [fix_summary.md](file:///Users/paritoshchaudhari/Documents/Codex/2026-06-21/he/outputs/NetGaugeMac/Docs/fix_summary.md): Technical breakdown of mathematical correctness fixes and troubleshooting guide.
+
+---
+
+## Running Automated Accuracy Tests
+
+To verify accuracy and feature functionality using the built-in test suite:
+
+```bash
+swift run NetGaugeMacTestRunner
+```
+
+This automated test suite verifies:
+1. 32-bit kernel counter wrap-around calculation accuracy.
+2. Multi-address network interface byte accumulation.
+3. Usage bucket ID uniqueness for SwiftUI chart rendering.
+4. Custom date range min/max start/end ordering.
+5. Non-overlapping exclusive upper bound database queries.
 
 ---
 
 ## Build & Relaunch Instructions
 
-To build the executable and resource bundle locally:
+To build the executable and sign with Apple App Sandbox entitlements:
 ```bash
 # Compile Release Binary
 swift build -c release
 
-# Update NetGaugeMac.app Bundle contents
+# Prepare NetGaugeMac.app Bundle contents
+rm -rf NetGaugeMac.app
+mkdir -p NetGaugeMac.app/Contents/MacOS NetGaugeMac.app/Contents/Resources
 cp .build/release/NetGaugeMac NetGaugeMac.app/Contents/MacOS/NetGaugeMac
-cp -r .build/release/NetGaugeMac_NetGaugeMac.bundle NetGaugeMac.app/Contents/Resources/
 cp Sources/NetGaugeMac/AppIcon.png NetGaugeMac.app/Contents/Resources/AppIcon.png
+cp Sources/NetGaugeMac/Info.plist NetGaugeMac.app/Contents/Info.plist
+
+# Clean extended attributes and sign with App Sandbox Entitlements
+xattr -cr NetGaugeMac.app
+codesign -s - --entitlements Sources/NetGaugeMac/NetGaugeMac.entitlements --force --deep NetGaugeMac.app
 
 # Update Applications folder installation
 rm -rf /Applications/NetGaugeMac.app
 cp -r NetGaugeMac.app /Applications/
 touch /Applications/NetGaugeMac.app
+xattr -cr /Applications/NetGaugeMac.app
 
 # Relaunch App
 killall NetGaugeMac || true

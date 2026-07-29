@@ -38,7 +38,7 @@ struct UsageEvent: Codable, Identifiable, Equatable, Sendable {
 }
 
 struct UsageBucket: Identifiable, Equatable, Sendable {
-    var id: String { "\(start.timeIntervalSinceReferenceDate)-\(received)-\(sent)" }
+    var id: String { "\(start.timeIntervalSince1970)-\(label)-\(received)-\(sent)" }
     let start: Date
     let label: String
     let received: UInt64
@@ -73,6 +73,8 @@ final class SQLiteDatabase {
             let errMsg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
             throw DatabaseError.openFailed(errMsg)
         }
+
+        sqlite3_busy_timeout(db, 5000)
 
         // Enable Write-Ahead Logging (WAL) mode for crash safety
         try execute(sql: "PRAGMA journal_mode=WAL;")
@@ -185,6 +187,30 @@ actor UsageStore {
 
         let dbURL = appDir.appending(path: "netgauge.db")
         self.fileURL = dbURL
+
+        // If target container DB does not exist, check for legacy unsandboxed DB and migrate
+        if !FileManager.default.fileExists(atPath: dbURL.path) {
+            let homeDir = NSHomeDirectory()
+            let legacyAppDir = URL(fileURLWithPath: homeDir)
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .appendingPathComponent("Library/Application Support/NetGaugeMac")
+            let legacyDbURL = legacyAppDir.appendingPathComponent("netgauge.db")
+            
+            if FileManager.default.fileExists(atPath: legacyDbURL.path) {
+                try? FileManager.default.copyItem(at: legacyDbURL, to: dbURL)
+                let legacyWal = legacyAppDir.appendingPathComponent("netgauge.db-wal")
+                let targetWal = appDir.appending(path: "netgauge.db-wal")
+                if FileManager.default.fileExists(atPath: legacyWal.path) {
+                    try? FileManager.default.copyItem(at: legacyWal, to: targetWal)
+                }
+                let legacyShm = legacyAppDir.appendingPathComponent("netgauge.db-shm")
+                let targetShm = appDir.appending(path: "netgauge.db-shm")
+                if FileManager.default.fileExists(atPath: legacyShm.path) {
+                    try? FileManager.default.copyItem(at: legacyShm, to: targetShm)
+                }
+            }
+        }
 
         let db = try SQLiteDatabase(path: dbURL.path)
         self.database = db
@@ -367,69 +393,52 @@ actor UsageStore {
     // MARK: – Read
 
     func loadTotals(from startDate: Date, to endDate: Date, networkName: String?) throws -> (rx: UInt64, tx: UInt64) {
-        let cal = Calendar.current
-
-        let minStart = cal.dateInterval(of: .minute, for: startDate)?.start ?? startDate
-        let minEnd   = cal.dateInterval(of: .minute, for: endDate)?.end ?? endDate
-
-        let hourStart = cal.dateInterval(of: .hour, for: startDate)?.start ?? startDate
-        let hourEnd   = cal.dateInterval(of: .hour, for: endDate)?.end ?? endDate
-
-        let dayStart = cal.startOfDay(for: startDate)
-        let dayEnd   = cal.dateInterval(of: .day, for: endDate)?.end ?? endDate
-
-        let startMinTs = Int64(minStart.timeIntervalSince1970)
-        let endMinTs   = Int64(minEnd.timeIntervalSince1970)
-
-        let startHourTs = Int64(hourStart.timeIntervalSince1970)
-        let endHourTs   = Int64(hourEnd.timeIntervalSince1970)
-
-        let startDayTs = Int64(dayStart.timeIntervalSince1970)
-        let endDayTs   = Int64(dayEnd.timeIntervalSince1970)
+        let startTs = Int64(startDate.timeIntervalSince1970)
+        let endTs   = Int64(endDate.timeIntervalSince1970)
 
         let sql: String
         if networkName != nil {
             sql = """
             SELECT SUM(bytes_rx), SUM(bytes_tx) FROM (
-                SELECT bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts <= ? AND network_name = ?
+                SELECT bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts < ? AND network_name = ?
                 UNION ALL
-                SELECT bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts <= ? AND network_name = ?
+                SELECT bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts < ? AND network_name = ?
                 UNION ALL
-                SELECT bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts <= ? AND network_name = ?
+                SELECT bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts < ? AND network_name = ?
             );
             """
         } else {
             sql = """
             SELECT SUM(bytes_rx), SUM(bytes_tx) FROM (
-                SELECT bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts <= ?
+                SELECT bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts < ?
                 UNION ALL
-                SELECT bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts <= ?
+                SELECT bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts < ?
                 UNION ALL
-                SELECT bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts <= ?
+                SELECT bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts < ?
             );
             """
         }
 
         let stmt = try database.prepare(sql: sql)
         if let networkName {
-            try stmt.bind(index: 1, value: startMinTs)
-            try stmt.bind(index: 2, value: endMinTs)
+            try stmt.bind(index: 1, value: startTs)
+            try stmt.bind(index: 2, value: endTs)
             try stmt.bind(index: 3, value: networkName)
 
-            try stmt.bind(index: 4, value: startHourTs)
-            try stmt.bind(index: 5, value: endHourTs)
+            try stmt.bind(index: 4, value: startTs)
+            try stmt.bind(index: 5, value: endTs)
             try stmt.bind(index: 6, value: networkName)
 
-            try stmt.bind(index: 7, value: startDayTs)
-            try stmt.bind(index: 8, value: endDayTs)
+            try stmt.bind(index: 7, value: startTs)
+            try stmt.bind(index: 8, value: endTs)
             try stmt.bind(index: 9, value: networkName)
         } else {
-            try stmt.bind(index: 1, value: startMinTs)
-            try stmt.bind(index: 2, value: endMinTs)
-            try stmt.bind(index: 3, value: startHourTs)
-            try stmt.bind(index: 4, value: endHourTs)
-            try stmt.bind(index: 5, value: startDayTs)
-            try stmt.bind(index: 6, value: endDayTs)
+            try stmt.bind(index: 1, value: startTs)
+            try stmt.bind(index: 2, value: endTs)
+            try stmt.bind(index: 3, value: startTs)
+            try stmt.bind(index: 4, value: endTs)
+            try stmt.bind(index: 5, value: startTs)
+            try stmt.bind(index: 6, value: endTs)
         }
 
         if stmt.step() == SQLITE_ROW {
@@ -470,11 +479,14 @@ actor UsageStore {
             SELECT network_name, bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ?
             UNION ALL
             SELECT network_name, bytes_rx, bytes_tx FROM network_hours WHERE ts >= ?
+            UNION ALL
+            SELECT network_name, bytes_rx, bytes_tx FROM network_days WHERE ts >= ?
         ) GROUP BY network_name;
         """
         let stmtMonth = try database.prepare(sql: sqlMonth)
         try stmtMonth.bind(index: 1, value: monthTs)
         try stmtMonth.bind(index: 2, value: monthTs)
+        try stmtMonth.bind(index: 3, value: monthTs)
         var monthStats: [String: (rx: UInt64, tx: UInt64)] = [:]
         while stmtMonth.step() == SQLITE_ROW {
             if let name = stmtMonth.columnText(index: 0) {
@@ -511,67 +523,52 @@ actor UsageStore {
     }
 
     func loadEvents(from startDate: Date, to endDate: Date, networkName: String?) throws -> [UsageEvent] {
-        let cal = Calendar.current
-
-        let minStart = cal.dateInterval(of: .minute, for: startDate)?.start ?? startDate
-        let minEnd   = cal.dateInterval(of: .minute, for: endDate)?.end ?? endDate
-
-        let hourStart = cal.dateInterval(of: .hour, for: startDate)?.start ?? startDate
-        let hourEnd   = cal.dateInterval(of: .hour, for: endDate)?.end ?? endDate
-
-        let dayStart = cal.startOfDay(for: startDate)
-        let dayEnd   = cal.dateInterval(of: .day, for: endDate)?.end ?? endDate
-
-        let startMinTs = Int64(minStart.timeIntervalSince1970)
-        let endMinTs   = Int64(minEnd.timeIntervalSince1970)
-
-        let startHourTs = Int64(hourStart.timeIntervalSince1970)
-        let endHourTs   = Int64(hourEnd.timeIntervalSince1970)
-
-        let startDayTs = Int64(dayStart.timeIntervalSince1970)
-        let endDayTs   = Int64(dayEnd.timeIntervalSince1970)
+        let startTs = Int64(startDate.timeIntervalSince1970)
+        let endTs   = Int64(endDate.timeIntervalSince1970)
 
         let sql: String
         if networkName != nil {
             sql = """
-            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 60 AS interval FROM network_minutes WHERE ts >= ? AND ts <= ? AND network_name = ? GROUP BY ts
-            UNION ALL
-            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 3600 AS interval FROM network_hours WHERE ts >= ? AND ts <= ? AND network_name = ? GROUP BY ts
-            UNION ALL
-            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 86400 AS interval FROM network_days WHERE ts >= ? AND ts <= ? AND network_name = ? GROUP BY ts
-            ORDER BY ts ASC;
+            SELECT ts, bytes_rx, bytes_tx, interval FROM (
+                SELECT ts, SUM(bytes_rx) AS bytes_rx, SUM(bytes_tx) AS bytes_tx, 60 AS interval FROM network_minutes WHERE ts >= ? AND ts < ? AND network_name = ? GROUP BY ts
+                UNION ALL
+                SELECT ts, SUM(bytes_rx) AS bytes_rx, SUM(bytes_tx) AS bytes_tx, 3600 AS interval FROM network_hours WHERE ts >= ? AND ts < ? AND network_name = ? GROUP BY ts
+                UNION ALL
+                SELECT ts, SUM(bytes_rx) AS bytes_rx, SUM(bytes_tx) AS bytes_tx, 86400 AS interval FROM network_days WHERE ts >= ? AND ts < ? AND network_name = ? GROUP BY ts
+            ) ORDER BY ts ASC;
             """
         } else {
             sql = """
-            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 60 AS interval FROM network_minutes WHERE ts >= ? AND ts <= ? GROUP BY ts
-            UNION ALL
-            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 3600 AS interval FROM network_hours WHERE ts >= ? AND ts <= ? GROUP BY ts
-            UNION ALL
-            SELECT ts, SUM(bytes_rx), SUM(bytes_tx), 86400 AS interval FROM network_days WHERE ts >= ? AND ts <= ? GROUP BY ts
-            ORDER BY ts ASC;
+            SELECT ts, bytes_rx, bytes_tx, interval FROM (
+                SELECT ts, SUM(bytes_rx) AS bytes_rx, SUM(bytes_tx) AS bytes_tx, 60 AS interval FROM network_minutes WHERE ts >= ? AND ts < ? GROUP BY ts
+                UNION ALL
+                SELECT ts, SUM(bytes_rx) AS bytes_rx, SUM(bytes_tx) AS bytes_tx, 3600 AS interval FROM network_hours WHERE ts >= ? AND ts < ? GROUP BY ts
+                UNION ALL
+                SELECT ts, SUM(bytes_rx) AS bytes_rx, SUM(bytes_tx) AS bytes_tx, 86400 AS interval FROM network_days WHERE ts >= ? AND ts < ? GROUP BY ts
+            ) ORDER BY ts ASC;
             """
         }
 
         let stmt = try database.prepare(sql: sql)
         if let networkName {
-            try stmt.bind(index: 1, value: startMinTs)
-            try stmt.bind(index: 2, value: endMinTs)
+            try stmt.bind(index: 1, value: startTs)
+            try stmt.bind(index: 2, value: endTs)
             try stmt.bind(index: 3, value: networkName)
 
-            try stmt.bind(index: 4, value: startHourTs)
-            try stmt.bind(index: 5, value: endHourTs)
+            try stmt.bind(index: 4, value: startTs)
+            try stmt.bind(index: 5, value: endTs)
             try stmt.bind(index: 6, value: networkName)
 
-            try stmt.bind(index: 7, value: startDayTs)
-            try stmt.bind(index: 8, value: endDayTs)
+            try stmt.bind(index: 7, value: startTs)
+            try stmt.bind(index: 8, value: endTs)
             try stmt.bind(index: 9, value: networkName)
         } else {
-            try stmt.bind(index: 1, value: startMinTs)
-            try stmt.bind(index: 2, value: endMinTs)
-            try stmt.bind(index: 3, value: startHourTs)
-            try stmt.bind(index: 4, value: endHourTs)
-            try stmt.bind(index: 5, value: startDayTs)
-            try stmt.bind(index: 6, value: endDayTs)
+            try stmt.bind(index: 1, value: startTs)
+            try stmt.bind(index: 2, value: endTs)
+            try stmt.bind(index: 3, value: startTs)
+            try stmt.bind(index: 4, value: endTs)
+            try stmt.bind(index: 5, value: startTs)
+            try stmt.bind(index: 6, value: endTs)
         }
 
         var events: [UsageEvent] = []
@@ -642,8 +639,9 @@ actor UsageStore {
                 bytes_rx = bytes_rx + excluded.bytes_rx,
                 bytes_tx = bytes_tx + excluded.bytes_tx;
             """
+            let insertStmt = try database.prepare(sql: insertSql)
             for (key, data) in rawRows {
-                let insertStmt = try database.prepare(sql: insertSql)
+                insertStmt.reset()
                 try insertStmt.bind(index: 1, value: key.ts)
                 try insertStmt.bind(index: 2, value: key.networkName)
                 try insertStmt.bind(index: 3, value: data.rx)
@@ -708,8 +706,9 @@ actor UsageStore {
                 bytes_rx = bytes_rx + excluded.bytes_rx,
                 bytes_tx = bytes_tx + excluded.bytes_tx;
             """
+            let insertStmt = try database.prepare(sql: insertSql)
             for (key, data) in rawRows {
-                let insertStmt = try database.prepare(sql: insertSql)
+                insertStmt.reset()
                 try insertStmt.bind(index: 1, value: key.ts)
                 try insertStmt.bind(index: 2, value: key.networkName)
                 try insertStmt.bind(index: 3, value: data.rx)

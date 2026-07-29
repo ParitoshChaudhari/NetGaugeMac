@@ -296,7 +296,7 @@ final class DashboardModel: ObservableObject {
 
     private var todayHourBuckets: [UsageBucket] {
         let interval = fixedInterval(for: .today)
-        return events.filtered(from: interval.start, to: interval.end)
+        return todayEvents.filtered(from: interval.start, to: interval.end)
             .bucketed(by: .hour)
     }
 
@@ -375,7 +375,7 @@ final class DashboardModel: ObservableObject {
             guard let previous = lastSnapshot else { return }
 
             let elapsed = snapshot.capturedAt.timeIntervalSince(previous.capturedAt)
-            guard elapsed > 0 else { return }
+            guard elapsed >= 0.5 else { return }
 
             let rxDelta = safeDelta(snapshot.bytesReceived, previous.bytesReceived)
             let txDelta = safeDelta(snapshot.bytesSent,    previous.bytesSent)
@@ -385,11 +385,7 @@ final class DashboardModel: ObservableObject {
             currentUploadBytesPerSecond   = Double(txDelta) / elapsed
 
             // Update Menu Bar speed title
-            let dl = currentDownloadBytesPerSecond
-            let ul = currentUploadBytesPerSecond
-            Task { @MainActor in
-                AppDelegate.shared?.updateStatusItemText(download: dl, upload: ul)
-            }
+            AppDelegate.shared?.updateStatusItemText(download: currentDownloadBytesPerSecond, upload: currentUploadBytesPerSecond)
 
             // Accumulate delta bytes per network interface
             let prevByID = Dictionary(uniqueKeysWithValues: previous.interfaces.map { ($0.id, $0) })
@@ -481,7 +477,11 @@ final class DashboardModel: ObservableObject {
     }
 
     private func safeDelta(_ current: UInt64, _ previous: UInt64) -> UInt64 {
-        current >= previous ? current - previous : 0
+        if current >= previous {
+            return current - previous
+        }
+        // Handle 32-bit kernel counter overflow (~4.29 GB)
+        return (UInt64(UInt32.max) - previous) + current + 1
     }
 
     private func buildRates(
@@ -534,7 +534,9 @@ final class DashboardModel: ObservableObject {
             let start = cal.date(byAdding: .day, value: -30, to: now) ?? now
             return DateInterval(start: start, end: now)
         case .custom:
-            return DateInterval(start: customStartDate, end: customEndDate)
+            let s = min(customStartDate, customEndDate)
+            let e = max(customStartDate, customEndDate)
+            return DateInterval(start: s, end: e)
         }
     }
 
@@ -589,12 +591,21 @@ final class DashboardModel: ObservableObject {
             }
         }
 
-        if isWifi || displayName == "Wi-Fi" {
-            if let ssid = CWWiFiClient.shared().interface()?.ssid(), !ssid.isEmpty {
+        // Wi-Fi SSID resolution
+        if isWifi || displayName.localizedCaseInsensitiveContains("Wi-Fi") || interfaceName == "en0" {
+            let client = CWWiFiClient.shared()
+            let wifiInterface = client.interface(withName: interfaceName) ?? client.interface()
+            if let ssid = wifiInterface?.ssid(), !ssid.isEmpty {
                 return "Wi-Fi: \(ssid)"
-            } else {
-                return "Wi-Fi"
             }
+            if let allInterfaces = client.interfaces() {
+                for iface in allInterfaces {
+                    if let ssid = iface.ssid(), !ssid.isEmpty {
+                        return "Wi-Fi: \(ssid)"
+                    }
+                }
+            }
+            return "Wi-Fi"
         }
 
         return displayName
@@ -617,7 +628,15 @@ final class LocationHelper: NSObject, CLLocationManagerDelegate {
     func requestPermission() {
         let status = manager.authorizationStatus
         if status == .notDetermined {
-            manager.requestWhenInUseAuthorization()
+            manager.requestAlwaysAuthorization()
+        } else if status == .authorizedAlways || status == .authorized {
+            manager.requestLocation()
         }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
     }
 }

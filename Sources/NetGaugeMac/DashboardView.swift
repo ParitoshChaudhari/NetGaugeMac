@@ -44,6 +44,7 @@ struct DashboardView: View {
     @State private var selectedBucket: UsageBucket?
     @State private var selectedChartX: CGFloat?
     @State private var livePulse       = false
+    @State private var tooltipDismissTask: Task<Void, Never>?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -52,7 +53,7 @@ struct DashboardView: View {
             VStack(spacing: 0) {
 
                 // ── Scrollable content ─────────────────────────────────────
-                ScrollView(.vertical, showsIndicators: false) {
+                ScrollView(.vertical, showsIndicators: true) {
                     VStack(alignment: .leading, spacing: 24) {
                         headlineAndMetrics
                         liveRateStrip
@@ -269,8 +270,12 @@ struct DashboardView: View {
 
                 // Legend
                 HStack(spacing: 14) {
-                    LegendItem(label: "Download", color: ngDownload)
-                    LegendItem(label: "Upload",   color: ngUpload)
+                    if model.chartMode != .upload {
+                        LegendItem(label: "Download", color: ngDownload)
+                    }
+                    if model.chartMode != .download {
+                        LegendItem(label: "Upload",   color: ngUpload)
+                    }
                 }
                 .padding(.leading, 6)
             }
@@ -413,9 +418,10 @@ struct DashboardView: View {
                                 )
                             }
                             .onEnded { _ in
-                                // Use Swift concurrency instead of GCD to stay on @MainActor.
-                                Task {
+                                tooltipDismissTask?.cancel()
+                                tooltipDismissTask = Task {
                                     try? await Task.sleep(for: .seconds(1.8))
+                                    guard !Task.isCancelled else { return }
                                     selectedBucket = nil
                                     selectedChartX = nil
                                 }
@@ -448,7 +454,9 @@ struct DashboardView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "calendar")
                         .font(.caption2)
-                    Text(Date().formatted(date: .abbreviated, time: .omitted))
+                    Text(model.selectedRange == .custom
+                        ? "\(model.customStartDate.formatted(date: .abbreviated, time: .omitted)) – \(model.customEndDate.formatted(date: .abbreviated, time: .omitted))"
+                        : model.selectedRange.rawValue)
                         .font(.caption.weight(.medium))
                 }
                 .foregroundStyle(ngText2)
@@ -721,112 +729,6 @@ struct DashboardView: View {
     }
 }
 
-// MARK: - NavBar
-
-private struct NavBar: View {
-    private let navItems = ["Dashboard", "Analytics", "Interfaces", "About"]
-    @State private var selected = "Dashboard"
-
-    var body: some View {
-        HStack(spacing: 0) {
-            // Logo — uses the generated app icon PNG bundled with the app.
-            HStack(spacing: 10) {
-                // Swift Package Manager doesn't use asset catalogs; load by filename.
-                Group {
-                    if let url = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
-                       let nsImg = NSImage(contentsOf: url) {
-                        Image(nsImage: nsImg)
-                            .resizable()
-                            .interpolation(.high)
-                            .scaledToFill()
-                            .frame(width: 34, height: 34)
-                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                            .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
-                    } else {
-                        // Fallback if PNG isn't bundled yet.
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(ngDownload)
-                                .frame(width: 34, height: 34)
-                            Image(systemName: "wifi")
-                                .font(.system(size: 15, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
-                    }
-                }
-                    .accessibilityLabel("NetGauge app icon")
-                Text("NetGauge")
-                    .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(ngText1)
-            }
-            .padding(.leading, 28)
-
-            Spacer()
-
-            // Navigation tabs
-            HStack(spacing: 1) {
-                ForEach(navItems, id: \.self) { item in
-                    let isSel = item == selected
-                    Button(action: { selected = item }) {
-                        Text(item)
-                            .font(.system(size: 13, weight: isSel ? .semibold : .regular))
-                            .foregroundStyle(isSel ? .white : ngText2)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 7)
-                            .background(isSel ? ngText1 : .clear)
-                            .clipShape(Capsule())
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(3)
-            .background(ngBg)
-            .clipShape(Capsule())
-
-            Spacer()
-
-            // Right controls — each icon button gets an accessibility label
-            // so VoiceOver users understand its purpose (Apple HIG requirement).
-            HStack(spacing: 10) {
-                Button(action: {}) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(ngText2)
-                        .frame(width: 34, height: 34)
-                        .background(ngBg)
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Search")
-
-                Button(action: {}) {
-                    Image(systemName: "bell")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(ngText2)
-                        .frame(width: 34, height: 34)
-                        .background(ngBg)
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Notifications")
-
-                // Avatar badge
-                ZStack {
-                    Circle()
-                        .fill(ngDownload.opacity(0.18))
-                        .frame(width: 34, height: 34)
-                    Text("NG")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(ngDownload)
-                }
-                .accessibilityLabel("NetGauge user profile")
-            }
-            .padding(.trailing, 28)
-        }
-        .frame(height: 58)
-    }
-}
-
 // MARK: - Range Picker
 
 private struct RangePicker: View {
@@ -1006,8 +908,8 @@ private struct ChartTooltipCard: View {
                 .clipShape(Capsule())
 
             VStack(alignment: .leading, spacing: 5) {
-                TooltipRow(label: "Download", value: bucket.received.byteString, color: ngDownload, prefix: "▲")
-                TooltipRow(label: "Upload",   value: bucket.sent.byteString,     color: ngUpload,   prefix: "▼")
+                TooltipRow(label: "Download", value: bucket.received.byteString, color: ngDownload, prefix: "▼")
+                TooltipRow(label: "Upload",   value: bucket.sent.byteString,     color: ngUpload,   prefix: "▲")
             }
 
             ngSep.frame(height: 1)
@@ -1395,7 +1297,7 @@ private extension UInt64 {
 
     /// Compact byte count for chart axis labels (e.g. "2.4 GB")
     var shortByteString: String {
-        guard self > 0 else { return "0 KB" }
+        guard self > 0 else { return "0 B" }
         let fmt = ByteCountFormatter()
         fmt.countStyle   = .binary
         fmt.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
