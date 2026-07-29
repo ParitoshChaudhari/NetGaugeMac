@@ -72,7 +72,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isQuittingFromMenu || isSystemShuttingDown {
-            return .terminateNow
+            // Flush any unsaved in-memory samples before the process exits
+            Task { @MainActor in
+                await model.flushPendingData()
+                NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
         } else {
             // Intercept Cmd+Q, Dock Quit, App Menu Quit
             // Just hide the window and keep the app running in the Menu Bar
@@ -108,6 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let menu = NSMenu()
         menu.addItem(NSMenuItem(title: "Open Dashboard", action: #selector(openDashboardAction), keyEquivalent: "d"))
+        menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettingsAction), keyEquivalent: ","))
         menu.addItem(NSMenuItem(title: "About NetGauge", action: #selector(showAboutPanelAction), keyEquivalent: "a"))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAppAction), keyEquivalent: "q"))
@@ -116,6 +122,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openDashboardAction() {
+        model.selectedTab = .dashboard
+        openDashboardWindow()
+    }
+
+    @objc private func openSettingsAction() {
+        model.selectedTab = .settings
         openDashboardWindow()
     }
 

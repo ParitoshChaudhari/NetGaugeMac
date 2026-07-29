@@ -22,12 +22,19 @@ enum DashboardRange: String, CaseIterable, Identifiable, Sendable {
     var id: String { rawValue }
 }
 
+enum AppTab: String, CaseIterable, Identifiable, Sendable {
+    case dashboard = "Dashboard"
+    case settings  = "Settings"
+    var id: String { rawValue }
+}
+
 // MARK: - DashboardModel
 
 @MainActor
 final class DashboardModel: ObservableObject {
 
     // MARK: Published state
+    @Published var selectedTab: AppTab = .dashboard
     @Published private(set) var events: [UsageEvent] = []
     @Published private(set) var currentDownloadBytesPerSecond: Double = 0
     @Published private(set) var currentUploadBytesPerSecond: Double = 0
@@ -84,11 +91,15 @@ final class DashboardModel: ObservableObject {
     private var captureTask: Task<Void, Never>?
     private var inMemorySamples: [UsageEvent] = []
     private var lastRollupTime: Date = Date()
+    private var lastRefreshTime: Date = .distantPast
+    private var lastFlushedMinute: Date = .distantPast
     private var todayEvents: [UsageEvent] = []
     private var yesterdayDownload: UInt64 = 0
     private var yesterdayUpload: UInt64 = 0
     private var monthTotalValue: UInt64 = 0
     private var networkUsageDeltas: [String: (rx: UInt64, tx: UInt64)] = [:]
+    // SSID cache: maps BSD interface name → (ssid, lastLookedUp)
+    private var ssidCache: [String: (name: String, cachedAt: Date)] = [:]
 
     // MARK: – Lifecycle
 
@@ -394,20 +405,25 @@ final class DashboardModel: ObservableObject {
                     let rx = safeDelta(cur.bytesReceived, prev.bytesReceived)
                     let tx = safeDelta(cur.bytesSent, prev.bytesSent)
                     if rx > 0 || tx > 0 {
-                        let netName = getNetworkName(for: cur.name)
+                        // Use cached SSID — only re-query CoreWLAN/SystemConfiguration
+                        // every 30 seconds per interface to avoid per-second overhead.
+                        let netName = cachedNetworkName(for: cur.name, at: snapshot.capturedAt)
                         let currentAccum = networkUsageDeltas[netName] ?? (0, 0)
                         networkUsageDeltas[netName] = (currentAccum.0 + rx, currentAccum.1 + tx)
 
-                        // Append an in-memory sample for this network interface
-                        let event = UsageEvent(
-                            id: UUID(),
-                            timestamp: snapshot.capturedAt,
-                            bytesReceived: rx,
-                            bytesSent: tx,
-                            intervalSeconds: elapsed,
-                            networkName: netName
-                        )
-                        inMemorySamples.append(event)
+                        // Append an in-memory sample for this network interface.
+                        // Cap at 10,000 entries to prevent unbounded memory growth.
+                        if inMemorySamples.count < 10_000 {
+                            let event = UsageEvent(
+                                id: UUID(),
+                                timestamp: snapshot.capturedAt,
+                                bytesReceived: rx,
+                                bytesSent: tx,
+                                intervalSeconds: elapsed,
+                                networkName: netName
+                            )
+                            inMemorySamples.append(event)
+                        }
                     }
                 }
             }
@@ -460,10 +476,16 @@ final class DashboardModel: ObservableObject {
                 inMemorySamples = toKeep
             }
 
-            await refreshEvents()
+            // Throttle refreshEvents: only run when data was flushed to DB,
+            // or at most every 5 seconds (not every 1-second tick).
+            let now = Date()
+            let didFlush = !toFlush.isEmpty
+            if didFlush || now.timeIntervalSince(lastRefreshTime) >= 5 {
+                lastRefreshTime = now
+                await refreshEvents()
+            }
 
             // Periodically check/run rollups (hourly)
-            let now = Date()
             if now.timeIntervalSince(lastRollupTime) > 3600 {
                 lastRollupTime = now
                 Task {
@@ -480,7 +502,8 @@ final class DashboardModel: ObservableObject {
         if current >= previous {
             return current - previous
         }
-        // Handle 32-bit kernel counter overflow (~4.29 GB)
+        // Handle 32-bit kernel counter overflow at ~4.29 GB.
+        // getifaddrs ifi_ibytes/ifi_obytes are u_int32_t on macOS — they wrap at UInt32.max.
         return (UInt64(UInt32.max) - previous) + current + 1
     }
 
@@ -571,6 +594,19 @@ final class DashboardModel: ObservableObject {
         }
     }
 
+    /// Returns the cached network name for a BSD interface name.
+    /// Re-queries CoreWLAN/SystemConfiguration at most every 30 seconds per interface
+    /// to avoid expensive synchronous calls on every 1-second capture tick.
+    private func cachedNetworkName(for interfaceName: String, at now: Date) -> String {
+        if let cached = ssidCache[interfaceName],
+           now.timeIntervalSince(cached.cachedAt) < 30 {
+            return cached.name
+        }
+        let resolved = getNetworkName(for: interfaceName)
+        ssidCache[interfaceName] = (name: resolved, cachedAt: now)
+        return resolved
+    }
+
     private func getNetworkName(for interfaceName: String) -> String {
         var displayName = interfaceName
         var isWifi = false
@@ -594,21 +630,99 @@ final class DashboardModel: ObservableObject {
         // Wi-Fi SSID resolution
         if isWifi || displayName.localizedCaseInsensitiveContains("Wi-Fi") || interfaceName == "en0" {
             let client = CWWiFiClient.shared()
-            let wifiInterface = client.interface(withName: interfaceName) ?? client.interface()
-            if let ssid = wifiInterface?.ssid(), !ssid.isEmpty {
+            // Prefer the exact interface by name first
+            if let wifiInterface = client.interface(withName: interfaceName),
+               let ssid = wifiInterface.ssid(), !ssid.isEmpty {
                 return "Wi-Fi: \(ssid)"
             }
+            // Fallback: scan all CoreWLAN interfaces for an SSID on this BSD name
             if let allInterfaces = client.interfaces() {
                 for iface in allInterfaces {
-                    if let ssid = iface.ssid(), !ssid.isEmpty {
+                    if iface.interfaceName == interfaceName,
+                       let ssid = iface.ssid(), !ssid.isEmpty {
                         return "Wi-Fi: \(ssid)"
                     }
                 }
             }
-            return "Wi-Fi"
+            // SSID unresolvable (Location permission not yet granted, or airplane mode).
+            // Use the interface name as a disambiguator so each physical adapter
+            // stays a distinct row in the database instead of all collapsing into "Wi-Fi".
+            return "Wi-Fi (\(interfaceName))"
         }
 
         return displayName
+    }
+
+    /// Flush any accumulated in-memory deltas to the database immediately.
+    /// Called on graceful shutdown so no data is lost for sessions < 1 minute.
+    func flushPendingData() async {
+        guard let store else { return }
+        let cal = Calendar.current
+        guard !inMemorySamples.isEmpty else { return }
+
+        struct GroupKey: Hashable {
+            let minStart: Date
+            let networkName: String
+        }
+        var grouped: [GroupKey: (rx: UInt64, tx: UInt64)] = [:]
+        for e in inMemorySamples {
+            let minStart = cal.dateInterval(of: .minute, for: e.timestamp)?.start ?? e.timestamp
+            let netName = e.networkName ?? "Primary"
+            let key = GroupKey(minStart: minStart, networkName: netName)
+            let current = grouped[key] ?? (0, 0)
+            grouped[key] = (current.0 + e.bytesReceived, current.1 + e.bytesSent)
+        }
+        for (key, data) in grouped {
+            try? await store.insertMinute(timestamp: key.minStart, networkName: key.networkName, bytesReceived: data.rx, bytesSent: data.tx)
+        }
+        for (netName, data) in networkUsageDeltas {
+            try? await store.updateNetworkUsage(networkName: netName, bytesReceived: data.rx, bytesSent: data.tx, timestamp: Date())
+        }
+        networkUsageDeltas.removeAll()
+        inMemorySamples.removeAll()
+    }
+
+    /// Resets all network usage data, wipes SQLite database tables,
+    /// clears in-memory buffers, and resets kernel sampling baselines.
+    func clearAllData() async {
+        do {
+            try await store?.clearAllData()
+        } catch {
+            storeError = error.localizedDescription
+        }
+
+        inMemorySamples.removeAll()
+        networkUsageDeltas.removeAll()
+        ssidCache.removeAll()
+        todayEvents.removeAll()
+        yesterdayDownload = 0
+        yesterdayUpload = 0
+        monthTotalValue = 0
+        interfaceRates = []
+        currentDownloadBytesPerSecond = 0
+        currentUploadBytesPerSecond = 0
+        events = []
+        networkUsages = []
+        rangeDownload = 0
+        rangeUpload = 0
+        rangeTotal = 0
+        previousDownload = 0
+        previousUpload = 0
+        previousTotal = 0
+        rangePeak = 0
+        rangeQuietest = 0
+        selectedNetwork = nil
+
+        // Reset sampler snapshot baseline so new traffic measures from zero
+        if let current = try? sampler.snapshot() {
+            lastSnapshot = current
+            lastUpdated = current.capturedAt
+        } else {
+            lastSnapshot = nil
+            lastUpdated = nil
+        }
+
+        await refreshEvents()
     }
 }
 
@@ -628,10 +742,17 @@ final class LocationHelper: NSObject, CLLocationManagerDelegate {
     func requestPermission() {
         let status = manager.authorizationStatus
         if status == .notDetermined {
-            manager.requestAlwaysAuthorization()
-        } else if status == .authorizedAlways || status == .authorized {
+            // requestWhenInUseAuthorization is the correct API on macOS.
+            // requestAlwaysAuthorization is iOS-only and is silently ignored on macOS.
+            manager.requestWhenInUseAuthorization()
+        } else if status == .authorized {
+            // On macOS, .authorized is the only "granted" state (no .authorizedWhenInUse)
             manager.requestLocation()
         }
+    }
+
+    var authorizationStatus: CLAuthorizationStatus {
+        manager.authorizationStatus
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {

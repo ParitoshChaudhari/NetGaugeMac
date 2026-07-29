@@ -463,9 +463,19 @@ actor UsageStore {
         }
 
         let todayTs = Int64(todayStart.timeIntervalSince1970)
-        let sqlToday = "SELECT network_name, SUM(bytes_rx), SUM(bytes_tx) FROM network_minutes WHERE ts >= ? GROUP BY network_name;"
+        let sqlToday = """
+        SELECT network_name, SUM(bytes_rx), SUM(bytes_tx) FROM (
+            SELECT network_name, bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ?
+            UNION ALL
+            SELECT network_name, bytes_rx, bytes_tx FROM network_hours WHERE ts >= ?
+            UNION ALL
+            SELECT network_name, bytes_rx, bytes_tx FROM network_days WHERE ts >= ?
+        ) GROUP BY network_name;
+        """
         let stmtToday = try database.prepare(sql: sqlToday)
         try stmtToday.bind(index: 1, value: todayTs)
+        try stmtToday.bind(index: 2, value: todayTs)
+        try stmtToday.bind(index: 3, value: todayTs)
         var todayStats: [String: (rx: UInt64, tx: UInt64)] = [:]
         while stmtToday.step() == SQLITE_ROW {
             if let name = stmtToday.columnText(index: 0) {
@@ -588,6 +598,17 @@ actor UsageStore {
             ))
         }
         return events
+    }
+
+    /// Truncates all SQLite tables and vacuums the database to reset all stored metrics.
+    func clearAllData() throws {
+        try database.execute(sql: """
+            DELETE FROM network_minutes;
+            DELETE FROM network_hours;
+            DELETE FROM network_days;
+            DELETE FROM network_usage;
+            VACUUM;
+        """)
     }
 
     // MARK: – Rollup Retention Jobs

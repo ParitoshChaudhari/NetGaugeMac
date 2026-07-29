@@ -46,33 +46,120 @@ struct DashboardView: View {
     @State private var livePulse       = false
     @State private var tooltipDismissTask: Task<Void, Never>?
 
+    // Settings & Alert states
+    @State private var showClearConfirmation = false
+    @State private var showSuccessToast = false
+
     var body: some View {
         ZStack(alignment: .top) {
             ngBg.ignoresSafeArea()
 
             VStack(spacing: 0) {
+                topNavigationBar
 
-                // ── Scrollable content ─────────────────────────────────────
-                ScrollView(.vertical, showsIndicators: true) {
-                    VStack(alignment: .leading, spacing: 24) {
-                        headlineAndMetrics
-                        liveRateStrip
-                        chartSection
-                        HStack(alignment: .top, spacing: 20) {
-                            performancePanel
-                            VStack(spacing: 20) {
-                                interfacePanel
-                                networkUsagePanel
-                            }
-                        }
-                        captureFooter
-                    }
-                    .padding(28)
+                ngSep.frame(height: 1)
+
+                if model.selectedTab == .dashboard {
+                    dashboardContent
+                } else {
+                    settingsContent
                 }
-                .id(model.selectedRange)   // reset scroll position on range change
+            }
+
+            // Success Toast Notification Banner
+            if showSuccessToast {
+                HStack(spacing: 8) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(ngGreen)
+                    Text("All network speed data cleared. App reset to fresh install state.")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(ngText1)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(Color.white)
+                .clipShape(Capsule())
+                .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                .overlay {
+                    Capsule().strokeBorder(ngGreen.opacity(0.4), lineWidth: 1)
+                }
+                .padding(.top, 60)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .animation(.snappy(duration: 0.25), value: showSuccessToast)
+        .animation(.easeInOut(duration: 0.2), value: model.selectedTab)
+        .alert("Clear All Network Data?", isPresented: $showClearConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Clear All Data", role: .destructive) {
+                Task {
+                    await model.clearAllData()
+                    withAnimation {
+                        showSuccessToast = true
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
+                        withAnimation {
+                            showSuccessToast = false
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text("This will permanently delete all recorded network speed and usage history and reset NetGauge to its fresh install state. This action cannot be undone.")
+        }
         .onAppear { livePulse = true }
+    }
+
+    // MARK: – Top Navigation Bar
+
+    private var topNavigationBar: some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 10) {
+                if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
+                   let nsImg = NSImage(contentsOf: url) {
+                    Image(nsImage: nsImg)
+                        .resizable()
+                        .frame(width: 24, height: 24)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else {
+                    Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                        .font(.system(size: 18))
+                        .foregroundStyle(ngDownload)
+                }
+                Text("NetGauge")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(ngText1)
+            }
+
+            Spacer()
+
+            AppTabPicker(selected: $model.selectedTab)
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 14)
+        .windowDragIfAvailable()
+    }
+
+    // MARK: – Dashboard Content
+
+    private var dashboardContent: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 24) {
+                headlineAndMetrics
+                liveRateStrip
+                chartSection
+                HStack(alignment: .top, spacing: 20) {
+                    performancePanel
+                    VStack(spacing: 20) {
+                        interfacePanel
+                        networkUsagePanel
+                    }
+                }
+                captureFooter
+            }
+            .padding(28)
+        }
+        .id(model.selectedRange)
     }
 
     // MARK: – Headline + Hero Metrics
@@ -684,7 +771,9 @@ struct DashboardView: View {
 
                 if let updated = model.lastUpdated {
                     Text("·").foregroundStyle(ngText2)
-                    Text("Updated \(updated.formatted(date: .omitted, time: .standard))")
+                    // Use verbatim to prevent SwiftUI treating the formatted date
+                    // as a LocalizedStringKey format string on macOS 26+
+                    Text(verbatim: "Updated \(updated.formatted(date: .omitted, time: .standard))")
                         .foregroundStyle(ngText2.opacity(0.65))
                 }
             }
@@ -698,6 +787,207 @@ struct DashboardView: View {
                 .foregroundStyle(ngText2)
         }
         .padding(.bottom, 4)
+    }
+
+    // MARK: – Settings View Tab
+
+    private var settingsContent: some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 24) {
+                // Header Title
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "gearshape.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(ngDownload)
+                        Text("Settings & Preferences")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(ngText1)
+                    }
+                    Text("Configure monitoring preferences, permissions, and data storage.")
+                        .font(.subheadline)
+                        .foregroundStyle(ngText2)
+                }
+
+                // Card 1: General Preferences
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("General Preferences")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(ngText1)
+                            Text("App startup behavior and status bar controls")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+                        Spacer()
+                    }
+
+                    ngSep.frame(height: 1)
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Launch at Login")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(ngText1)
+                            Text("Automatically start NetGauge in the Menu Bar when you log in.")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $model.isLaunchAtLoginEnabled)
+                            .toggleStyle(.switch)
+                            .tint(ngDownload)
+                    }
+                }
+                .padding(20)
+                .ngCard()
+
+                // Card 2: Wi-Fi & Location Permissions
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Wi-Fi SSID Resolution")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(ngText1)
+                            Text("Location permission required by macOS CoreWLAN to read Wi-Fi network names")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+                        Spacer()
+                    }
+
+                    ngSep.frame(height: 1)
+
+                    HStack(spacing: 12) {
+                        let isGranted = LocationHelper.shared.authorizationStatus == .authorized
+                        Image(systemName: isGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(isGranted ? ngGreen : ngAccent)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(isGranted ? "Location Permission Granted" : "Location Permission Required for SSIDs")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(ngText1)
+                            Text(isGranted
+                                 ? "NetGauge can resolve exact Wi-Fi network names (SSIDs)."
+                                 : "Without location access, Wi-Fi traffic is categorized by interface (e.g. Wi-Fi (en0)).")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+
+                        Spacer()
+
+                        if !isGranted {
+                            Button("Request Permission") {
+                                LocationHelper.shared.requestPermission()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(ngDownload)
+                        }
+                    }
+                }
+                .padding(20)
+                .ngCard()
+
+                // Card 3: Storage & Database
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Local Storage & Database")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(ngText1)
+                            Text("SQLite database location and retention strategy")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+                        Spacer()
+                    }
+
+                    ngSep.frame(height: 1)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Database file location:")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(ngText2)
+
+                        Text(verbatim: "~/Library/Application Support/NetGaugeMac/netgauge.db")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(ngText1)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(ngBg)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .textSelection(.enabled)
+                    }
+
+                    Text("Tiered Data Retention: 1-minute samples (7 days) · 1-hour rollups (30 days) · 1-day rollups (permanent).")
+                        .font(.caption2)
+                        .foregroundStyle(ngText2)
+                }
+                .padding(20)
+                .ngCard()
+
+                // Card 4: Danger Zone (Reset / Clear All Data)
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.shield.fill")
+                                    .foregroundStyle(ngRed)
+                                Text("Reset & Clear All Data")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(ngText1)
+                            }
+                            Text("Permanently delete all recorded bandwidth usage, SSID metrics, and history.")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+                        Spacer()
+                    }
+
+                    ngSep.frame(height: 1)
+
+                    HStack(alignment: .top, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Wipe All Network Speed & Usage Data")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(ngText1)
+                            Text("This action will erase all stored network history and reset NetGauge to its initial fresh install state.")
+                                .font(.caption)
+                                .foregroundStyle(ngText2)
+                        }
+
+                        Spacer()
+
+                        Button(action: {
+                            showClearConfirmation = true
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "trash.fill")
+                                Text("Clear All Data...")
+                            }
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(ngRed)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .shadow(color: ngRed.opacity(0.3), radius: 6, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(20)
+                .background(ngRed.opacity(0.03))
+                .clipShape(RoundedRectangle(cornerRadius: ngRadius, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: ngRadius, style: .continuous)
+                        .strokeBorder(ngRed.opacity(0.25), lineWidth: 1)
+                }
+            }
+            .padding(28)
+        }
     }
 
     // MARK: – Helpers
@@ -726,6 +1016,42 @@ struct DashboardView: View {
         if bytes >= 1_048_576    { return "MB" }
         if bytes >= 1_024        { return "KB" }
         return "B"
+    }
+}
+
+// MARK: - App Tab Picker
+
+private struct AppTabPicker: View {
+    @Binding var selected: AppTab
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(AppTab.allCases, id: \.id) { tab in
+                let isSel = selected == tab
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        selected = tab
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: tab == .dashboard ? "gauge.with.dots.needle.bottom.50percent" : "gearshape.fill")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text(tab.rawValue)
+                            .font(.system(size: 12, weight: isSel ? .semibold : .regular))
+                    }
+                    .foregroundStyle(isSel ? ngText1 : ngText2)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(isSel ? Color.white : Color.clear)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .shadow(color: isSel ? .black.opacity(0.06) : .clear, radius: 4, y: 2)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(3)
+        .background(ngBg)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
     }
 }
 
@@ -801,19 +1127,19 @@ private struct HeroMetric: View {
         VStack(alignment: .leading, spacing: 5) {
             // Big number + unit (like 45.3 kWh in reference)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value)
+                Text(verbatim: value)
                     .font(.system(size: 44, weight: .bold, design: .rounded))
                     .foregroundStyle(ngText1)
                     .monospacedDigit()
                 if !unit.isEmpty {
-                    Text(unit)
+                    Text(verbatim: unit)
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundStyle(ngText2)
                         .padding(.bottom, 2)
                 }
             }
 
-            Text(label)
+            Text(verbatim: label)
                 .font(.system(size: 13))
                 .foregroundStyle(ngText2)
 
@@ -822,15 +1148,15 @@ private struct HeroMetric: View {
                 HStack(spacing: 4) {
                     Image(systemName: dv > 0 ? "arrow.up" : "arrow.down")
                         .font(.system(size: 10, weight: .bold))
-                    Text(dv > 0 ? "+\(dv)%" : "\(dv)%")
+                    Text(verbatim: dv > 0 ? "+\(dv)%" : "\(dv)%")
                         .font(.system(size: 12, weight: .semibold))
-                    Text(deltaLabel)
+                    Text(verbatim: deltaLabel)
                         .font(.system(size: 11))
                         .foregroundStyle(ngText2)
                 }
                 .foregroundStyle(dv > 0 ? ngGreen : ngRed)
             } else if let b = badge {
-                Text(b)
+                Text(verbatim: b)
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(badgeColor)
             }
@@ -856,10 +1182,10 @@ private struct RateTile: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
+                Text(verbatim: title)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(ngText2)
-                Text(value)
+                Text(verbatim: value)
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
                     .foregroundStyle(ngText1)
                     .monospacedDigit()
@@ -899,7 +1225,7 @@ private struct ChartTooltipCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Bucket label as amber pill (matches reference style)
-            Text(bucket.label)
+            Text(verbatim: bucket.label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 9)
@@ -919,7 +1245,7 @@ private struct ChartTooltipCard: View {
                     .font(.caption2)
                     .foregroundStyle(ngText2)
                 Spacer()
-                Text(bucket.total.byteString)
+                Text(verbatim: bucket.total.byteString)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(ngText1)
                     .monospacedDigit()
@@ -946,13 +1272,13 @@ private struct TooltipRow: View {
     var body: some View {
         HStack {
             HStack(spacing: 5) {
-                Text(prefix)
+                Text(verbatim: prefix)
                     .foregroundStyle(color)
-                Text(label)
+                Text(verbatim: label)
                     .foregroundStyle(ngText2)
             }
             Spacer()
-            Text(value)
+            Text(verbatim: value)
                 .foregroundStyle(ngText1)
                 .monospacedDigit()
         }
@@ -973,11 +1299,11 @@ private struct MiniStatCard: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(label)
+                    Text(verbatim: label)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(ngText2)
                         .lineLimit(1)
-                    Text(sublabel)
+                    Text(verbatim: sublabel)
                         .font(.caption2)
                         .foregroundStyle(ngText2.opacity(0.65))
                         .lineLimit(1)
@@ -991,7 +1317,7 @@ private struct MiniStatCard: View {
                     .clipShape(Circle())
             }
 
-            Text(value)
+            Text(verbatim: value)
                 .font(.system(size: 20, weight: .bold, design: .rounded))
                 .foregroundStyle(ngText1)
                 .monospacedDigit()
@@ -1004,7 +1330,7 @@ private struct MiniStatCard: View {
                     HStack(spacing: 3) {
                         Image(systemName: delta > 0 ? "arrow.up" : "arrow.down")
                             .font(.system(size: 9, weight: .bold))
-                        Text(delta > 0 ? "+\(delta)%" : "\(delta)%")
+                        Text(verbatim: delta > 0 ? "+\(delta)%" : "\(delta)%")
                             .font(.system(size: 11, weight: .semibold))
                     }
                     .foregroundStyle(delta > 0 ? ngGreen : ngRed)
@@ -1065,11 +1391,11 @@ private struct InterfaceRateRow: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(rate.displayName)
+                Text(verbatim: rate.displayName)
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(ngText1)
                     .lineLimit(1)
-                Text(rate.name)
+                Text(verbatim: rate.name)
                     .font(.caption2.monospaced())
                     .foregroundStyle(ngText2)
             }
@@ -1131,7 +1457,7 @@ private struct NetworkUsageRow: View {
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(entry.networkName)
+                Text(verbatim: entry.networkName)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(isSelected ? ngAccent : ngText1)
                     .lineLimit(1)
@@ -1141,7 +1467,7 @@ private struct NetworkUsageRow: View {
                         Text("TODAY")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(ngText2)
-                        Text(entry.todayTotal.byteString)
+                        Text(verbatim: entry.todayTotal.byteString)
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(isSelected ? ngText1 : ngDownload)
                     }
@@ -1150,7 +1476,7 @@ private struct NetworkUsageRow: View {
                         Text("MONTH")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(ngText2)
-                        Text(entry.monthTotal.byteString)
+                        Text(verbatim: entry.monthTotal.byteString)
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(isSelected ? ngText1 : ngUpload)
                     }
@@ -1160,7 +1486,7 @@ private struct NetworkUsageRow: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 2) {
-                Text(entry.totalBytes.byteString)
+                Text(verbatim: entry.totalBytes.byteString)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(ngText1)
                 Text("Total")
@@ -1292,25 +1618,30 @@ private extension UInt64 {
     /// Full byte count (e.g. "2.45 GB")
     var byteString: String {
         guard self > 0 else { return "0 B" }
-        return ByteCountFormatter.string(fromByteCount: Int64(self), countStyle: .binary)
+        // Clamp to Int64.max (~9.2 EB) to prevent overflow in ByteCountFormatter
+        let safe = self > UInt64(Int64.max) ? Int64.max : Int64(self)
+        return ByteCountFormatter.string(fromByteCount: safe, countStyle: .binary)
     }
 
     /// Compact byte count for chart axis labels (e.g. "2.4 GB")
     var shortByteString: String {
         guard self > 0 else { return "0 B" }
+        let safe = self > UInt64(Int64.max) ? Int64.max : Int64(self)
         let fmt = ByteCountFormatter()
         fmt.countStyle   = .binary
         fmt.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
         fmt.isAdaptive   = true
-        return fmt.string(fromByteCount: Int64(self))
+        return fmt.string(fromByteCount: safe)
     }
 }
 
 extension Double {
     /// Rate formatted as bytes/second (e.g. "1.2 MB/s")
     var speedString: String {
-        guard self > 0 else { return "0 B/s" }
-        return "\(ByteCountFormatter.string(fromByteCount: Int64(max(self, 0)), countStyle: .binary))/s"
+        // Guard against NaN, Infinity, and values that would overflow Int64
+        guard self > 0, self.isFinite else { return "0 B/s" }
+        let clamped = min(self, Double(Int64.max))
+        return ByteCountFormatter.string(fromByteCount: Int64(clamped), countStyle: .binary) + "/s"
     }
 }
 
