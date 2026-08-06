@@ -17,18 +17,113 @@ private let ngText2      = Color(red: 0.420, green: 0.455, blue: 0.522)
 private let ngSep        = Color(red: 0.878, green: 0.894, blue: 0.914)
 private let ngRadius     = 16.0
 
+// MARK: - 3D Liquid Glass Drop Lens Effect
+
+private struct LiquidGlassLens: View {
+    var cornerRadius: CGFloat = 8
+    var isCapsule: Bool = false
+
+    var body: some View {
+        ZStack {
+            VisualEffectView(material: .selection, blendingMode: .withinWindow)
+
+            LinearGradient(
+                colors: [
+                    Color.white.opacity(0.48),
+                    Color.white.opacity(0.18),
+                    Color.white.opacity(0.08)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            VStack {
+                LinearGradient(
+                    colors: [Color.white.opacity(0.55), Color.white.opacity(0.0)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 8)
+                Spacer()
+            }
+        }
+        .clipShape(
+            RoundedRectangle(cornerRadius: isCapsule ? 100 : cornerRadius, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: isCapsule ? 100 : cornerRadius, style: .continuous)
+                .strokeBorder(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.85), Color.white.opacity(0.30)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    lineWidth: 1.2
+                )
+        )
+        .shadow(color: Color.black.opacity(0.25), radius: 6, x: 0, y: 3)
+    }
+}
+
 // MARK: - Card View Modifier
 
 private struct CardStyle: ViewModifier {
+    @EnvironmentObject private var model: DashboardModel
+
     func body(content: Content) -> some View {
-        content
-            .background(ngCard)
-            .clipShape(RoundedRectangle(cornerRadius: ngRadius, style: .continuous))
-            .shadow(color: .black.opacity(0.055), radius: 16, x: 0, y: 4)
-            .overlay {
-                RoundedRectangle(cornerRadius: ngRadius, style: .continuous)
-                    .strokeBorder(ngSep, lineWidth: 0.5)
-            }
+        if model.isLiquidGlassEnabled {
+            // Glass card opacity: transparency slider controls the dark HUD overlay opacity
+            // 0.0 slider = max transparent (clear-ish glass), 1.0 = more opaque dark glass
+            let cardOpacity = model.glassTransparency * 0.65 + 0.18
+            content
+                .background {
+                    ZStack {
+                        // Layer 1: vibrancy/blur material (Apple spec: .hudWindow, withinWindow)
+                        VisualEffectView(material: .hudWindow, blendingMode: .withinWindow)
+                        // Layer 2: dark tint overlay (controlled by transparency slider)
+                        Color(red: 0.10, green: 0.12, blue: 0.18)
+                            .opacity(cardOpacity)
+                        // Layer 3: top specular surface sheen (8pt height, Apple spec)
+                        VStack {
+                            LinearGradient(
+                                colors: [Color.white.opacity(0.10), Color.white.opacity(0.0)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                            .frame(height: 8)
+                            Spacer()
+                        }
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: ngRadius, style: .continuous))
+                // Apple spec card shadow: rgba(0,0,0,0.30), radius 20pt, y: 8pt
+                .shadow(color: Color.black.opacity(0.30), radius: 20, x: 0, y: 8)
+                .overlay {
+                    // Apple spec specular rim border: topLeading white 0.55 -> bottomTrailing white 0.15
+                    RoundedRectangle(cornerRadius: ngRadius, style: .continuous)
+                        .strokeBorder(
+                            LinearGradient(
+                                colors: [
+                                    Color.white.opacity(0.55),
+                                    Color.white.opacity(0.20),
+                                    Color.white.opacity(0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            lineWidth: 1.2
+                        )
+                }
+        } else {
+            content
+                .background(ngCard)
+                .clipShape(RoundedRectangle(cornerRadius: ngRadius, style: .continuous))
+                .shadow(color: .black.opacity(0.055), radius: 16, x: 0, y: 4)
+                .overlay {
+                    RoundedRectangle(cornerRadius: ngRadius, style: .continuous)
+                        .strokeBorder(ngSep, lineWidth: 0.5)
+                }
+        }
     }
 }
 
@@ -52,12 +147,49 @@ struct DashboardView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            ngBg.ignoresSafeArea()
+            if model.isLiquidGlassEnabled {
+                // Layer 1: Native window backdrop blur (Apple spec: .sidebar material, behindWindow)
+                VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                    .ignoresSafeArea()
+
+                // Layer 2: Deep indigo/midnight/charcoal mesh gradient (Apple Liquid Glass color spec)
+                // #1F1A38 → #14243D → #0F121F — always fully opaque as the dark base layer
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.122, green: 0.102, blue: 0.220), // #1F1A38 Dark Violet/Indigo
+                        Color(red: 0.078, green: 0.141, blue: 0.239), // #14243D Midnight Blue
+                        Color(red: 0.059, green: 0.071, blue: 0.122)  // #0F121F Dark Charcoal
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .opacity(0.92) // High opacity — transparency bar only controls card glass overlay
+                .ignoresSafeArea()
+
+                // Layer 3: Ambient glow spheres — cyan top-left, violet bottom-right (Apple spec)
+                // Sphere 1: #3399FF Electric Blue, 500×500pt, blur 90pt, offset (-180, -150)
+                Circle()
+                    .fill(Color(red: 0.200, green: 0.600, blue: 1.000).opacity(0.14))
+                    .frame(width: 500, height: 500)
+                    .blur(radius: 90)
+                    .offset(x: -180, y: -150)
+
+                // Sphere 2: #994DD6 Neon Violet, 450×450pt, blur 80pt, offset (200, 150)
+                Circle()
+                    .fill(Color(red: 0.600, green: 0.302, blue: 0.839).opacity(0.14))
+                    .frame(width: 450, height: 450)
+                    .blur(radius: 80)
+                    .offset(x: 200, y: 150)
+            } else {
+                ngBg.ignoresSafeArea()
+            }
 
             VStack(spacing: 0) {
                 topNavigationBar
 
-                ngSep.frame(height: 1)
+                // Separator: white/translucent in glass mode, standard gray in normal
+                (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep)
+                    .frame(height: 1)
 
                 if model.selectedTab == .dashboard {
                     dashboardContent
@@ -73,15 +205,24 @@ struct DashboardView: View {
                         .foregroundStyle(ngGreen)
                     Text("All network speed data cleared. App reset to fresh install state.")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
-                .background(Color.white)
+                .background {
+                    if model.isLiquidGlassEnabled {
+                        LiquidGlassLens(cornerRadius: 20)
+                    } else {
+                        Color.white
+                    }
+                }
                 .clipShape(Capsule())
-                .shadow(color: .black.opacity(0.12), radius: 12, y: 4)
+                .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
                 .overlay {
-                    Capsule().strokeBorder(ngGreen.opacity(0.4), lineWidth: 1)
+                    Capsule().strokeBorder(
+                        model.isLiquidGlassEnabled ? Color.white.opacity(0.4) : ngGreen.opacity(0.4),
+                        lineWidth: 1
+                    )
                 }
                 .padding(.top, 60)
                 .transition(.move(edge: .top).combined(with: .opacity))
@@ -92,15 +233,14 @@ struct DashboardView: View {
         .alert("Clear All Network Data?", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Clear All Data", role: .destructive) {
-                Task {
+                Task { @MainActor in
                     await model.clearAllData()
                     withAnimation {
                         showSuccessToast = true
                     }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) {
-                        withAnimation {
-                            showSuccessToast = false
-                        }
+                    try? await Task.sleep(for: .seconds(3.5))
+                    withAnimation {
+                        showSuccessToast = false
                     }
                 }
             }
@@ -128,7 +268,7 @@ struct DashboardView: View {
                 }
                 Text("NetGauge")
                     .font(.system(size: 17, weight: .bold))
-                    .foregroundStyle(ngText1)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
             }
 
             Spacer()
@@ -159,7 +299,9 @@ struct DashboardView: View {
             }
             .padding(28)
         }
-        .id(model.selectedRange)
+        // Note: .id(model.selectedRange) was removed — it destroyed the entire
+        // ScrollView hierarchy on range change, losing scroll position and
+        // freezing the livePulse animation permanently.
     }
 
     // MARK: – Headline + Hero Metrics
@@ -188,13 +330,13 @@ struct DashboardView: View {
                     }
                     Text("LIVE MONITORING")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.8) : ngText2)
                         .tracking(1.5)
                 }
 
                 Text("Live Traffic")
                     .font(.system(size: 36, weight: .bold))
-                    .foregroundStyle(ngText1)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
 
                 // Time-period pills
                 RangePicker(selected: $model.selectedRange)
@@ -307,10 +449,10 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Usage Distribution")
                         .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     Text("Bytes transferred over the selected period")
                         .font(.caption)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                 }
 
                 Spacer()
@@ -340,15 +482,25 @@ struct DashboardView: View {
                         Image(systemName: model.selectedNetwork == nil ? "network" : "wifi.router")
                             .font(.system(size: 11, weight: .semibold))
                         Text(model.selectedNetwork ?? "All Networks")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 12, weight: .semibold))
                         Image(systemName: "chevron.down")
                             .font(.system(size: 9, weight: .bold))
                     }
-                    .foregroundStyle(ngText1)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(ngBg)
-                    .clipShape(Capsule())
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : Color.black)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background {
+                        if model.isLiquidGlassEnabled {
+                            LiquidGlassLens(isCapsule: true)
+                        } else {
+                            Color.white.clipShape(Capsule())
+                        }
+                    }
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(model.isLiquidGlassEnabled ? Color.white.opacity(0.6) : Color.black, lineWidth: 1.5)
+                    )
+                    .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
                 }
                 .menuStyle(.button)
 
@@ -464,12 +616,12 @@ struct DashboardView: View {
         .chartYAxis {
             AxisMarks { value in
                 AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    .foregroundStyle(ngSep)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.15) : ngSep)
                 AxisValueLabel {
                     if let bytes = value.as(Double.self) {
                         Text(UInt64(max(bytes, 0)).shortByteString)
                             .font(.caption2)
-                            .foregroundStyle(ngText2)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                     }
                 }
             }
@@ -480,7 +632,7 @@ struct DashboardView: View {
                     if let label = value.as(String.self) {
                         Text(label)
                             .font(.system(size: 9))
-                            .foregroundStyle(ngText2)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                             .rotationEffect(.degrees(45))
                     }
                 }
@@ -506,7 +658,7 @@ struct DashboardView: View {
                             }
                             .onEnded { _ in
                                 tooltipDismissTask?.cancel()
-                                tooltipDismissTask = Task {
+                                tooltipDismissTask = Task { @MainActor in
                                     try? await Task.sleep(for: .seconds(1.8))
                                     guard !Task.isCancelled else { return }
                                     selectedBucket = nil
@@ -531,13 +683,13 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Network Performance")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     Text("Usage summary by direction")
                         .font(.caption)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                 }
                 Spacer()
-                // Date range badge (matches reference)
+                // Date range badge
                 HStack(spacing: 5) {
                     Image(systemName: "calendar")
                         .font(.caption2)
@@ -546,14 +698,14 @@ struct DashboardView: View {
                         : model.selectedRange.rawValue)
                         .font(.caption.weight(.medium))
                 }
-                .foregroundStyle(ngText2)
+                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(ngBg)
+                .background(model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngBg)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
             }
 
-            ngSep.frame(height: 1)
+            (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
             // 3-column grid of mini stat cards
             LazyVGrid(
@@ -618,21 +770,21 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Active Interfaces")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     Text("Real-time device load")
                         .font(.caption)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
                     .padding(7)
-                    .background(ngBg)
+                    .background(model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngBg)
                     .clipShape(Circle())
             }
 
-            ngSep.frame(height: 1)
+            (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
             if model.interfaceRates.isEmpty {
                 // Empty state
@@ -642,10 +794,10 @@ struct DashboardView: View {
                         .foregroundStyle(ngDownload)
                     Text("No active interfaces")
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     Text("Start browsing or downloading to see active interfaces here.")
                         .font(.caption)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)
@@ -665,10 +817,15 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Local store")
                         .font(.caption2.weight(.semibold))
-                        .foregroundStyle(ngText2)
-                    Text("~/Library/Application Support/NetGaugeMac/netgauge.db")
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
+                    // Compute the real path at runtime so sandboxed container path
+                    // (~/Library/Containers/.../Data/Library/...) is shown correctly.
+                    let dbPath = FileManager.default
+                        .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                        .appending(path: "NetGaugeMac/netgauge.db").path ?? ""
+                    Text(verbatim: dbPath)
                         .font(.caption2.monospaced())
-                        .foregroundStyle(ngText2.opacity(0.65))
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.45) : ngText2.opacity(0.65))
                         .textSelection(.enabled)
                 }
                 .padding(.top, 12)
@@ -688,21 +845,21 @@ struct DashboardView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Usage by Network")
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     Text("SSID & connection totals")
                         .font(.caption)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                 }
                 Spacer()
                 Image(systemName: "wifi.router")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
                     .padding(7)
-                    .background(ngBg)
+                    .background(model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngBg)
                     .clipShape(Circle())
             }
 
-            ngSep.frame(height: 1)
+            (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
             if model.networkUsages.isEmpty {
                 VStack(spacing: 10) {
@@ -711,10 +868,10 @@ struct DashboardView: View {
                         .foregroundStyle(ngAccent)
                     Text("No network data")
                         .font(.subheadline.weight(.medium))
-                        .foregroundStyle(ngText1)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     Text("Connect to a network to start tracking usage.")
                         .font(.caption)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)
@@ -767,14 +924,14 @@ struct DashboardView: View {
                 }
 
                 Text("Sampling 1/sec · SQLite Retention Safe")
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
 
                 if let updated = model.lastUpdated {
-                    Text("·").foregroundStyle(ngText2)
+                    Text("·").foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.40) : ngText2)
                     // Use verbatim to prevent SwiftUI treating the formatted date
                     // as a LocalizedStringKey format string on macOS 26+
                     Text(verbatim: "Updated \(updated.formatted(date: .omitted, time: .standard))")
-                        .foregroundStyle(ngText2.opacity(0.65))
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.45) : ngText2.opacity(0.65))
                 }
             }
             .font(.footnote)
@@ -784,7 +941,7 @@ struct DashboardView: View {
             Toggle("Launch at Login", isOn: $model.isLaunchAtLoginEnabled)
                 .font(.footnote)
                 .toggleStyle(.checkbox)
-                .foregroundStyle(ngText2)
+                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
         }
         .padding(.bottom, 4)
     }
@@ -802,11 +959,11 @@ struct DashboardView: View {
                             .foregroundStyle(ngDownload)
                         Text("Settings & Preferences")
                             .font(.system(size: 28, weight: .bold))
-                            .foregroundStyle(ngText1)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     }
                     Text("Configure monitoring preferences, permissions, and data storage.")
                         .font(.subheadline)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                 }
 
                 // Card 1: General Preferences
@@ -815,29 +972,118 @@ struct DashboardView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("General Preferences")
                                 .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(ngText1)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             Text("App startup behavior and status bar controls")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
                         Spacer()
                     }
 
-                    ngSep.frame(height: 1)
+                    (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Launch at Login")
                                 .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(ngText1)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             Text("Automatically start NetGauge in the Menu Bar when you log in.")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
                         Spacer()
                         Toggle("", isOn: $model.isLaunchAtLoginEnabled)
                             .toggleStyle(.switch)
                             .tint(ngDownload)
+                    }
+                }
+                .padding(20)
+                .ngCard()
+
+                // Card: Liquid Glass Theme & Visuals
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(model.isLiquidGlassEnabled ? Color(red: 0.5, green: 0.85, blue: 1.0) : ngDownload)
+                                Text("Liquid Glass Theme & Visuals")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
+                            }
+                            Text("Configure Apple core app Liquid Glass materials, backdrop translucency, and glass opacity")
+                                .font(.caption)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
+                        }
+                        Spacer()
+                    }
+
+                    (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
+
+                    // Liquid Glass Checkbox Toggle
+                    HStack(alignment: .top, spacing: 12) {
+                        Toggle(isOn: $model.isLiquidGlassEnabled) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Liquid Glass")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
+                                Text("Transform the entire application UI to Apple's Liquid Glass material design with backdrop blur, specular edge highlights, and dynamic glass depth.")
+                                    .font(.caption)
+                                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+
+                    if model.isLiquidGlassEnabled {
+                        Color.white.opacity(0.12).frame(height: 1)
+
+                        // Transparency Bar (Slider) — controls glass card overlay opacity
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "slider.horizontal.3")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color(red: 0.5, green: 0.85, blue: 1.0))
+                                    Text("Glass Card Opacity")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundStyle(Color.white)
+                                }
+
+                                Spacer()
+
+                                let translucencyPct = Int((1.0 - model.glassTransparency) * 100)
+                                let opacityPct = Int(model.glassTransparency * 100)
+                                Text("\(translucencyPct)% Clear · \(opacityPct)% Opaque")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Color(red: 0.5, green: 0.85, blue: 1.0))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(Color.white.opacity(0.12))
+                                    .clipShape(Capsule())
+                            }
+
+                            HStack(spacing: 12) {
+                                Image(systemName: "circle.dotted")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.white.opacity(0.65))
+                                Text("Clear")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Color.white.opacity(0.65))
+
+                                Slider(value: $model.glassTransparency, in: 0.0...1.0)
+                                    .tint(Color(red: 0.5, green: 0.85, blue: 1.0))
+
+                                Text("Opaque")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundStyle(Color.white.opacity(0.65))
+                                Image(systemName: "circle.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.white.opacity(0.65))
+                            }
+                        }
+                        .transition(.move(edge: .top).combined(with: .opacity))
                     }
                 }
                 .padding(20)
@@ -849,15 +1095,15 @@ struct DashboardView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Wi-Fi SSID Resolution")
                                 .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(ngText1)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             Text("Location permission required by macOS CoreWLAN to read Wi-Fi network names")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
                         Spacer()
                     }
 
-                    ngSep.frame(height: 1)
+                    (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
                     HStack(spacing: 12) {
                         let isGranted = LocationHelper.shared.authorizationStatus == .authorized
@@ -868,12 +1114,12 @@ struct DashboardView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(isGranted ? "Location Permission Granted" : "Location Permission Required for SSIDs")
                                 .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(ngText1)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             Text(isGranted
                                  ? "NetGauge can resolve exact Wi-Fi network names (SSIDs)."
                                  : "Without location access, Wi-Fi traffic is categorized by interface (e.g. Wi-Fi (en0)).")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
 
                         Spacer()
@@ -896,34 +1142,39 @@ struct DashboardView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Local Storage & Database")
                                 .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(ngText1)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             Text("SQLite database location and retention strategy")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
                         Spacer()
                     }
 
-                    ngSep.frame(height: 1)
+                    (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Database file location:")
                             .font(.caption.weight(.medium))
-                            .foregroundStyle(ngText2)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
 
-                        Text(verbatim: "~/Library/Application Support/NetGaugeMac/netgauge.db")
+                        // Compute the real path at runtime — the app is sandboxed so
+                        // the actual location is inside ~/Library/Containers/.../Data/
+                        let dbPath = FileManager.default
+                            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                            .appending(path: "NetGaugeMac/netgauge.db").path ?? "Unknown"
+                        Text(verbatim: dbPath)
                             .font(.caption.monospaced())
-                            .foregroundStyle(ngText1)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(ngBg)
+                            .background(model.isLiquidGlassEnabled ? Color.white.opacity(0.10) : ngBg)
                             .clipShape(RoundedRectangle(cornerRadius: 8))
                             .textSelection(.enabled)
                     }
 
                     Text("Tiered Data Retention: 1-minute samples (7 days) · 1-hour rollups (30 days) · 1-day rollups (permanent).")
                         .font(.caption2)
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.55) : ngText2)
                 }
                 .padding(20)
                 .ngCard()
@@ -937,25 +1188,25 @@ struct DashboardView: View {
                                     .foregroundStyle(ngRed)
                                 Text("Reset & Clear All Data")
                                     .font(.system(size: 16, weight: .semibold))
-                                    .foregroundStyle(ngText1)
+                                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             }
                             Text("Permanently delete all recorded bandwidth usage, SSID metrics, and history.")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
                         Spacer()
                     }
 
-                    ngSep.frame(height: 1)
+                    (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngSep).frame(height: 1)
 
                     HStack(alignment: .top, spacing: 16) {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Wipe All Network Speed & Usage Data")
                                 .font(.system(size: 13, weight: .bold))
-                                .foregroundStyle(ngText1)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                             Text("This action will erase all stored network history and reset NetGauge to its initial fresh install state.")
                                 .font(.caption)
-                                .foregroundStyle(ngText2)
+                                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.65) : ngText2)
                         }
 
                         Spacer()
@@ -979,11 +1230,11 @@ struct DashboardView: View {
                     }
                 }
                 .padding(20)
-                .background(ngRed.opacity(0.03))
+                .background(model.isLiquidGlassEnabled ? Color.red.opacity(0.08) : ngRed.opacity(0.03))
                 .clipShape(RoundedRectangle(cornerRadius: ngRadius, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: ngRadius, style: .continuous)
-                        .strokeBorder(ngRed.opacity(0.25), lineWidth: 1)
+                        .strokeBorder(ngRed.opacity(model.isLiquidGlassEnabled ? 0.45 : 0.25), lineWidth: 1)
                 }
             }
             .padding(28)
@@ -1022,14 +1273,16 @@ struct DashboardView: View {
 // MARK: - App Tab Picker
 
 private struct AppTabPicker: View {
+    @EnvironmentObject private var model: DashboardModel
     @Binding var selected: AppTab
+    @Namespace private var tabNS
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 0) {
             ForEach(AppTab.allCases, id: \.id) { tab in
                 let isSel = selected == tab
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.18)) {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
                         selected = tab
                     }
                 }) {
@@ -1037,84 +1290,217 @@ private struct AppTabPicker: View {
                         Image(systemName: tab == .dashboard ? "gauge.with.dots.needle.bottom.50percent" : "gearshape.fill")
                             .font(.system(size: 11, weight: .semibold))
                         Text(tab.rawValue)
-                            .font(.system(size: 12, weight: isSel ? .semibold : .regular))
+                            .font(.system(size: 12, weight: isSel ? .semibold : .medium))
                     }
-                    .foregroundStyle(isSel ? ngText1 : ngText2)
+                    .foregroundStyle(
+                        model.isLiquidGlassEnabled
+                        ? (isSel ? Color.white : Color.white.opacity(0.60))
+                        : (isSel ? Color.white : Color.black)
+                    )
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(isSel ? Color.white : Color.clear)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .shadow(color: isSel ? .black.opacity(0.06) : .clear, radius: 4, y: 2)
+                    // Use matchedGeometryEffect for the selection pill so SwiftUI
+                    // smoothly interpolates position/size instead of creating and
+                    // destroying a VisualEffectView (NSVisualEffectView) on every tap.
+                    // Conditionally constructing NSVisualEffectView while the window
+                    // is mid-animation races with AppKit and causes a crash.
+                    .background {
+                        if isSel {
+                            Group {
+                                if model.isLiquidGlassEnabled {
+                                    // Liquid glass: vivid blue/teal toggle-style pill (matches iOS switch accent)
+                                    ZStack {
+                                        // Base: vibrant selection blur
+                                        VisualEffectView(material: .selection, blendingMode: .withinWindow)
+                                        // Teal-blue gradient accent — same hue as macOS toggle switch
+                                        LinearGradient(
+                                            colors: [
+                                                Color(red: 0.10, green: 0.55, blue: 1.00),
+                                                Color(red: 0.20, green: 0.40, blue: 0.90)
+                                            ],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                        .opacity(0.85)
+                                        // Top specular sheen
+                                        VStack {
+                                            LinearGradient(
+                                                colors: [Color.white.opacity(0.30), Color.white.opacity(0.0)],
+                                                startPoint: .top,
+                                                endPoint: .bottom
+                                            )
+                                            .frame(height: 8)
+                                            Spacer()
+                                        }
+                                    }
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                            .strokeBorder(
+                                                LinearGradient(
+                                                    colors: [Color.white.opacity(0.60), Color.white.opacity(0.20)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ),
+                                                lineWidth: 1.2
+                                            )
+                                    )
+                                    .shadow(color: Color(red: 0.10, green: 0.55, blue: 1.00).opacity(0.45), radius: 8, x: 0, y: 3)
+                                } else {
+                                    // Non-glass: solid black filled pill with white text
+                                    Color.black
+                                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+                            }
+                            .matchedGeometryEffect(id: "tabIndicator", in: tabNS)
+                        }
+                    }
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(3)
-        .background(ngBg)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .background {
+            if model.isLiquidGlassEnabled {
+                // Glass track: translucent with subtle white border
+                Color.white.opacity(0.08)
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+            } else {
+                // Non-glass: white fill with visible black border
+                Color.white
+                    .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .strokeBorder(Color.black, lineWidth: 1.5)
+                    )
+            }
+        }
     }
 }
 
 // MARK: - Range Picker
 
 private struct RangePicker: View {
+    @EnvironmentObject private var model: DashboardModel
     @Binding var selected: DashboardRange
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 3) {
             ForEach(DashboardRange.allCases, id: \.id) { range in
                 let isSel = selected == range
-                Button(action: { selected = range }) {
+                Button(action: {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) {
+                        selected = range
+                    }
+                }) {
                     Text(range.shortLabel)
-                        .font(.system(size: 12, weight: isSel ? .semibold : .regular))
-                        .foregroundStyle(isSel ? ngText1 : ngText2)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(isSel ? Color.white : Color.clear)
-                        .clipShape(RoundedRectangle(cornerRadius: 7))
-                        .shadow(color: isSel ? .black.opacity(0.07) : .clear, radius: 4, y: 2)
+                        .font(.system(size: 12, weight: isSel ? .semibold : .medium))
+                        .foregroundStyle(
+                            model.isLiquidGlassEnabled
+                            ? (isSel ? Color.white : Color.white.opacity(0.60))
+                            : (isSel ? Color.white : Color.black)
+                        )
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 6)
+                        .background {
+                            if isSel {
+                                if model.isLiquidGlassEnabled {
+                                    LiquidGlassLens(cornerRadius: 7)
+                                } else {
+                                    Color.black
+                                        .clipShape(RoundedRectangle(cornerRadius: 7))
+                                }
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
             }
         }
         .padding(3)
-        .background(ngBg)
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background {
+            if model.isLiquidGlassEnabled {
+                Color.white.opacity(0.08)
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+            } else {
+                Color.white
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .strokeBorder(Color.black, lineWidth: 1.5)
+                    )
+            }
+        }
     }
 }
 
 // MARK: - Chart Mode Picker
 
 private struct ChartModePicker: View {
+    @EnvironmentObject private var model: DashboardModel
     @Binding var selected: ChartMode
 
     var body: some View {
-        HStack(spacing: 1) {
+        HStack(spacing: 2) {
             ForEach(ChartMode.allCases) { mode in
                 let isSel = selected == mode
                 Button(action: {
-                    withAnimation(.easeInOut(duration: 0.18)) { selected = mode }
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.75)) { selected = mode }
                 }) {
                     Text(mode.rawValue)
-                        .font(.system(size: 12, weight: isSel ? .semibold : .regular))
-                        .foregroundStyle(isSel ? .white : ngText2)
-                        .padding(.horizontal, 12)
+                        .font(.system(size: 12, weight: isSel ? .semibold : .medium))
+                        .foregroundStyle(
+                            model.isLiquidGlassEnabled
+                            ? (isSel ? Color.white : Color.white.opacity(0.60))
+                            : (isSel ? .white : Color.black)
+                        )
+                        .padding(.horizontal, 13)
                         .padding(.vertical, 6)
-                        .background(isSel ? ngText1 : .clear)
-                        .clipShape(Capsule())
+                        .background {
+                            if isSel {
+                                if model.isLiquidGlassEnabled {
+                                    LiquidGlassLens(isCapsule: true)
+                                } else {
+                                    Color.black.clipShape(Capsule())
+                                }
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(2)
-        .background(ngBg)
-        .clipShape(Capsule())
+        .padding(3)
+        .background {
+            if model.isLiquidGlassEnabled {
+                Color.white.opacity(0.08)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule().strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+                    )
+            } else {
+                Color.white
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule().strokeBorder(Color.black, lineWidth: 1.5)
+                    )
+            }
+        }
     }
 }
 
 // MARK: - Hero Metric Card
 
+// MARK: - Hero Metric Card
+
 private struct HeroMetric: View {
+    @EnvironmentObject private var model: DashboardModel
     let value:      String
     let unit:       String
     let label:      String
@@ -1129,19 +1515,19 @@ private struct HeroMetric: View {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(verbatim: value)
                     .font(.system(size: 44, weight: .bold, design: .rounded))
-                    .foregroundStyle(ngText1)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     .monospacedDigit()
                 if !unit.isEmpty {
                     Text(verbatim: unit)
                         .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
                         .padding(.bottom, 2)
                 }
             }
 
             Text(verbatim: label)
                 .font(.system(size: 13))
-                .foregroundStyle(ngText2)
+                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
 
             // Delta or badge
             if let dv = deltaValue, dv != 0 {
@@ -1152,7 +1538,7 @@ private struct HeroMetric: View {
                         .font(.system(size: 12, weight: .semibold))
                     Text(verbatim: deltaLabel)
                         .font(.system(size: 11))
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.72) : ngText2)
                 }
                 .foregroundStyle(dv > 0 ? ngGreen : ngRed)
             } else if let b = badge {
@@ -1167,6 +1553,7 @@ private struct HeroMetric: View {
 // MARK: - Live Rate Tile
 
 private struct RateTile: View {
+    @EnvironmentObject private var model: DashboardModel
     let icon:  String
     let title: String
     let value: String
@@ -1178,16 +1565,16 @@ private struct RateTile: View {
                 .font(.system(size: 20))
                 .foregroundStyle(color)
                 .frame(width: 40, height: 40)
-                .background(color.opacity(0.10))
+                .background(color.opacity(model.isLiquidGlassEnabled ? 0.20 : 0.10))
                 .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: title)
                     .font(.caption.weight(.medium))
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
                 Text(verbatim: value)
                     .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .foregroundStyle(ngText1)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     .monospacedDigit()
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
@@ -1202,6 +1589,7 @@ private struct RateTile: View {
 // MARK: - Legend Item
 
 private struct LegendItem: View {
+    @EnvironmentObject private var model: DashboardModel
     let label: String
     let color: Color
 
@@ -1212,7 +1600,7 @@ private struct LegendItem: View {
                 .frame(width: 18, height: 3)
             Text(label)
                 .font(.caption)
-                .foregroundStyle(ngText2)
+                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.8) : ngText2)
         }
     }
 }
@@ -1289,6 +1677,7 @@ private struct TooltipRow: View {
 // MARK: - Mini Stat Card (Performance Panel)
 
 private struct MiniStatCard: View {
+    @EnvironmentObject private var model: DashboardModel
     let label:    String
     let sublabel: String
     let value:    String
@@ -1301,25 +1690,25 @@ private struct MiniStatCard: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(verbatim: label)
                         .font(.caption.weight(.medium))
-                        .foregroundStyle(ngText2)
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.75) : ngText2)
                         .lineLimit(1)
                     Text(verbatim: sublabel)
                         .font(.caption2)
-                        .foregroundStyle(ngText2.opacity(0.65))
+                        .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.55) : ngText2.opacity(0.65))
                         .lineLimit(1)
                 }
                 Spacer()
                 Image(systemName: "arrow.right")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.8) : ngText2)
                     .padding(5)
-                    .background(Color.white)
+                    .background(model.isLiquidGlassEnabled ? Color.white.opacity(0.15) : Color.white)
                     .clipShape(Circle())
             }
 
             Text(verbatim: value)
                 .font(.system(size: 20, weight: .bold, design: .rounded))
-                .foregroundStyle(ngText1)
+                .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
@@ -1340,11 +1729,11 @@ private struct MiniStatCard: View {
             }
         }
         .padding(14)
-        .background(ngBg)
+        .background(model.isLiquidGlassEnabled ? Color.white.opacity(0.08) : ngBg)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(ngSep.opacity(0.6), lineWidth: 0.5)
+                .strokeBorder(model.isLiquidGlassEnabled ? Color.white.opacity(0.18) : ngSep.opacity(0.6), lineWidth: 0.5)
         }
     }
 }
@@ -1370,6 +1759,7 @@ private struct SparklineBars: View {
 // MARK: - Interface Rate Row
 
 private struct InterfaceRateRow: View {
+    @EnvironmentObject private var model: DashboardModel
     let rate: InterfaceRate
 
     private var icon: String {
@@ -1387,17 +1777,17 @@ private struct InterfaceRateRow: View {
                 .font(.system(size: 14))
                 .foregroundStyle(ngDownload)
                 .frame(width: 32, height: 32)
-                .background(ngDownload.opacity(0.08))
+                .background(ngDownload.opacity(model.isLiquidGlassEnabled ? 0.20 : 0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(verbatim: rate.displayName)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(ngText1)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                     .lineLimit(1)
                 Text(verbatim: rate.name)
                     .font(.caption2.monospaced())
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.55) : ngText2)
             }
 
             Spacer()
@@ -1447,38 +1837,43 @@ private struct NetworkUsageRow: View {
         return ngText2
     }
 
+    @EnvironmentObject private var model: DashboardModel
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 14))
                 .foregroundStyle(isSelected ? .white : iconColor)
                 .frame(width: 32, height: 32)
-                .background(isSelected ? iconColor : iconColor.opacity(0.08))
+                .background(isSelected ? iconColor : iconColor.opacity(model.isLiquidGlassEnabled ? 0.20 : 0.08))
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(verbatim: entry.networkName)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isSelected ? ngAccent : ngText1)
+                    .foregroundStyle(
+                        isSelected ? ngAccent
+                        : (model.isLiquidGlassEnabled ? Color.white : ngText1)
+                    )
                     .lineLimit(1)
                 
                 HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 1) {
                         Text("TODAY")
                             .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(ngText2)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.55) : ngText2)
                         Text(verbatim: entry.todayTotal.byteString)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(isSelected ? ngText1 : ngDownload)
+                            .foregroundStyle(isSelected ? Color.white : ngDownload)
                     }
                     
                     VStack(alignment: .leading, spacing: 1) {
                         Text("MONTH")
                             .font(.system(size: 8, weight: .bold))
-                            .foregroundStyle(ngText2)
+                            .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.55) : ngText2)
                         Text(verbatim: entry.monthTotal.byteString)
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(isSelected ? ngText1 : ngUpload)
+                            .foregroundStyle(isSelected ? Color.white : ngUpload)
                     }
                 }
             }
@@ -1488,15 +1883,18 @@ private struct NetworkUsageRow: View {
             VStack(alignment: .trailing, spacing: 2) {
                 Text(verbatim: entry.totalBytes.byteString)
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(ngText1)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white : ngText1)
                 Text("Total")
                     .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(ngText2)
+                    .foregroundStyle(model.isLiquidGlassEnabled ? Color.white.opacity(0.55) : ngText2)
             }
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 8)
-        .background(isSelected ? ngBg.opacity(0.7) : Color.clear)
+        .background(isSelected
+            ? (model.isLiquidGlassEnabled ? Color.white.opacity(0.12) : ngBg.opacity(0.7))
+            : Color.clear
+        )
         .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }

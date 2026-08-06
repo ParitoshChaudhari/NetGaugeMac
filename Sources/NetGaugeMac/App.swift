@@ -51,6 +51,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: NSWorkspace.willPowerOffNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(handleWakeFromSleep),
+            name: NSWorkspace.didWakeNotification,
+            object: nil
+        )
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -60,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let uptime = self.getSystemUptime()
             if uptime < 120.0 {
                 NSApp.setActivationPolicy(.accessory)
+                self.restoreStatusItem()
             } else {
                 self.openDashboardWindow()
             }
@@ -67,7 +74,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func handlePowerOff(_ notification: Notification) {
-        isSystemShuttingDown = true
+        Task { @MainActor in
+            self.isSystemShuttingDown = true
+        }
+    }
+
+    @objc private func handleWakeFromSleep(_ notification: Notification) {
+        restoreStatusItem()
+    }
+
+    private func restoreStatusItem() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.statusItem?.isVisible = true
+            let dl = self.model.currentDownloadBytesPerSecond
+            let ul = self.model.currentUploadBytesPerSecond
+            self.updateStatusItemText(download: dl, upload: ul)
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -79,13 +102,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return .terminateLater
         } else {
-            // Intercept Cmd+Q, Dock Quit, App Menu Quit
-            // Just hide the window and keep the app running in the Menu Bar
+            // Intercept Cmd+Q, Dock Quit, App Menu Quit.
+            // Cancel any in-flight SwiftUI/AppKit animations before hiding the window.
+            // Without this, a spring animation on AppTabPicker (VisualEffectView pill)
+            // can race with orderOut and corrupt SwiftUI state, causing a crash.
             DispatchQueue.main.async { [weak self] in
-                if let window = self?.dashboardWindow {
-                    NSApp.setActivationPolicy(.accessory)
-                    window.orderOut(nil)
-                }
+                guard let self, let window = self.dashboardWindow else { return }
+                NSAnimationContext.beginGrouping()
+                NSAnimationContext.current.duration = 0
+                NSAnimationContext.current.allowsImplicitAnimation = false
+                NSApp.setActivationPolicy(.accessory)
+                self.restoreStatusItem()
+                window.orderOut(nil)
+                NSAnimationContext.endGrouping()
             }
             return .terminateCancel
         }
@@ -96,9 +125,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // Open the window when the user clicks the Dock icon
+        // Open the window when the user clicks the Dock icon.
+        // Return false to signal we handled it ourselves; returning true would let
+        // AppKit attempt its own reopen handling and potentially open a second window.
         openDashboardWindow()
-        return true
+        return false
     }
 
     // MARK: – Status Menu
@@ -159,6 +190,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.title = "NetGauge"
         window.delegate = self
+        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: contentView)
 
         self.dashboardWindow = window
@@ -183,6 +215,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func updateStatusItemText(download: Double, upload: Double) {
+        if statusItem?.button == nil {
+            setupStatusItem()
+            statusItem?.isVisible = true
+        }
         guard let button = statusItem?.button else { return }
 
         let dlString = download.speedString
@@ -220,9 +256,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: – NSWindowDelegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Intercept close button and hide the window instead of destroying it
+        // Intercept close button and hide the window instead of destroying it.
+        // Cancel in-flight animations first to prevent VisualEffectView crash.
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
         NSApp.setActivationPolicy(.accessory)
+        restoreStatusItem()
         sender.orderOut(nil)
+        NSAnimationContext.endGrouping()
         return false
     }
 

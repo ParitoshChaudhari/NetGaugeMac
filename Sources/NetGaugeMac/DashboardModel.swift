@@ -44,6 +44,7 @@ final class DashboardModel: ObservableObject {
     @Published private(set) var networkUsages: [NetworkUsageStats] = []
     @Published var selectedNetwork: String? = nil {
         didSet {
+            guard selectedNetwork != oldValue else { return }
             Task { await refreshEvents() }
         }
     }
@@ -63,17 +64,20 @@ final class DashboardModel: ObservableObject {
 
     @Published var selectedRange: DashboardRange = .today {
         didSet {
+            guard selectedRange != oldValue else { return }
             Task { await refreshEvents() }
         }
     }
     @Published var customStartDate: Date = Calendar.current.date(
         byAdding: .day, value: -7, to: Date()) ?? Date() {
         didSet {
+            guard customStartDate != oldValue else { return }
             Task { await refreshEvents() }
         }
     }
     @Published var customEndDate: Date = Date() {
         didSet {
+            guard customEndDate != oldValue else { return }
             Task { await refreshEvents() }
         }
     }
@@ -83,6 +87,20 @@ final class DashboardModel: ObservableObject {
             toggleLaunchAtLogin(enabled: isLaunchAtLoginEnabled)
         }
     }
+
+    // Liquid Glass settings with UserDefaults persistence
+    @Published var isLiquidGlassEnabled: Bool = UserDefaults.standard.bool(forKey: "isLiquidGlassEnabled") {
+        didSet {
+            UserDefaults.standard.set(isLiquidGlassEnabled, forKey: "isLiquidGlassEnabled")
+        }
+    }
+
+    @Published var glassTransparency: Double = (UserDefaults.standard.object(forKey: "glassTransparency") as? Double) ?? 0.35 {
+        didSet {
+            UserDefaults.standard.set(glassTransparency, forKey: "glassTransparency")
+        }
+    }
+
 
     // MARK: Private
     private let sampler = NetworkSampler()
@@ -358,8 +376,11 @@ final class DashboardModel: ObservableObject {
 
     private func percentDelta(current: UInt64, previous: UInt64) -> Int {
         guard previous > 0 else { return 0 }
-        let delta = Int64(current) - Int64(previous)
-        return Int((Double(delta) / Double(previous) * 100).rounded())
+        // Use clamped conversion to prevent Int64 overflow for very large UInt64 values
+        let c = Int64(clamping: current)
+        let p = Int64(clamping: previous)
+        let delta = c - p
+        return Int((Double(delta) / Double(p) * 100).rounded())
     }
 
     private func captureLoop() async {
@@ -412,18 +433,38 @@ final class DashboardModel: ObservableObject {
                         networkUsageDeltas[netName] = (currentAccum.0 + rx, currentAccum.1 + tx)
 
                         // Append an in-memory sample for this network interface.
-                        // Cap at 10,000 entries to prevent unbounded memory growth.
-                        if inMemorySamples.count < 10_000 {
-                            let event = UsageEvent(
-                                id: UUID(),
-                                timestamp: snapshot.capturedAt,
-                                bytesReceived: rx,
-                                bytesSent: tx,
-                                intervalSeconds: elapsed,
-                                networkName: netName
-                            )
-                            inMemorySamples.append(event)
+                        // Force-flush to DB when approaching the cap to prevent data loss.
+                        if inMemorySamples.count >= 9_500 {
+                            // About to hit cap — flush all current samples immediately
+                            let calFlush = Calendar.current
+                            struct ForceGroupKey: Hashable {
+                                let minStart: Date
+                                let networkName: String
+                            }
+                            var forceGrouped: [ForceGroupKey: (rx: UInt64, tx: UInt64)] = [:]
+                            for e in inMemorySamples {
+                                let minStart = calFlush.dateInterval(of: .minute, for: e.timestamp)?.start ?? e.timestamp
+                                let netN = e.networkName ?? "Primary"
+                                let key = ForceGroupKey(minStart: minStart, networkName: netN)
+                                let cur = forceGrouped[key] ?? (0, 0)
+                                forceGrouped[key] = (cur.0 + e.bytesReceived, cur.1 + e.bytesSent)
+                            }
+                            for (key, data) in forceGrouped {
+                                if let store {
+                                    try? await store.insertMinute(timestamp: key.minStart, networkName: key.networkName, bytesReceived: data.rx, bytesSent: data.tx)
+                                }
+                            }
+                            inMemorySamples.removeAll()
                         }
+                        let event = UsageEvent(
+                            id: UUID(),
+                            timestamp: snapshot.capturedAt,
+                            bytesReceived: rx,
+                            bytesSent: tx,
+                            intervalSeconds: elapsed,
+                            networkName: netName
+                        )
+                        inMemorySamples.append(event)
                     }
                 }
             }
@@ -433,7 +474,6 @@ final class DashboardModel: ObservableObject {
             let currentMinuteStart = cal.dateInterval(of: .minute, for: snapshot.capturedAt)?.start ?? snapshot.capturedAt
 
             let toFlush = inMemorySamples.filter { $0.timestamp < currentMinuteStart }
-            let toKeep = inMemorySamples.filter { $0.timestamp >= currentMinuteStart }
 
             if !toFlush.isEmpty {
                 // Group by timestamp and network name!
@@ -473,7 +513,9 @@ final class DashboardModel: ObservableObject {
                 }
                 networkUsageDeltas.removeAll()
 
-                inMemorySamples = toKeep
+                inMemorySamples.removeAll(where: { sample in
+                    toFlush.contains(where: { $0.id == sample.id })
+                })
             }
 
             // Throttle refreshEvents: only run when data was flushed to DB,
@@ -504,7 +546,11 @@ final class DashboardModel: ObservableObject {
         }
         // Handle 32-bit kernel counter overflow at ~4.29 GB.
         // getifaddrs ifi_ibytes/ifi_obytes are u_int32_t on macOS — they wrap at UInt32.max.
-        return (UInt64(UInt32.max) - previous) + current + 1
+        let overflowDelta = (UInt64(UInt32.max) - previous) + current + 1
+        // Cap at ~10 GB/s to prevent false traffic spikes on interface reset
+        // (e.g., wake from sleep resets counters to 0)
+        let maxReasonableDelta: UInt64 = 10_000_000_000  // 10 GB
+        return overflowDelta > maxReasonableDelta ? 0 : overflowDelta
     }
 
     private func buildRates(
@@ -658,7 +704,7 @@ final class DashboardModel: ObservableObject {
     func flushPendingData() async {
         guard let store else { return }
         let cal = Calendar.current
-        guard !inMemorySamples.isEmpty else { return }
+        guard !inMemorySamples.isEmpty || !networkUsageDeltas.isEmpty else { return }
 
         struct GroupKey: Hashable {
             let minStart: Date
@@ -730,7 +776,7 @@ final class DashboardModel: ObservableObject {
 import CoreLocation
 
 @MainActor
-final class LocationHelper: NSObject, CLLocationManagerDelegate {
+final class LocationHelper: NSObject, @preconcurrency CLLocationManagerDelegate {
     static let shared = LocationHelper()
     private let manager = CLLocationManager()
 
@@ -755,9 +801,11 @@ final class LocationHelper: NSObject, CLLocationManagerDelegate {
         manager.authorizationStatus
     }
 
-    nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+    func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        // Empty — location is only requested to unblock SSID resolution via CoreWLAN.
     }
 
-    nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+    func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // Ignore location errors; Wi-Fi fallback to interface-name is acceptable.
     }
 }

@@ -38,7 +38,11 @@ struct UsageEvent: Codable, Identifiable, Equatable, Sendable {
 }
 
 struct UsageBucket: Identifiable, Equatable, Sendable {
-    var id: String { "\(start.timeIntervalSince1970)-\(label)-\(received)-\(sent)" }
+    // NOTE: id is intentionally based only on stable, identity-defining properties
+    // (start time + label). Including received/sent would change the id on every
+    // data refresh, causing SwiftUI's ForEach to treat each bucket as brand new
+    // and re-animate the entire chart — producing visible flicker.
+    var id: String { "\(start.timeIntervalSince1970)-\(label)" }
     let start: Date
     let label: String
     let received: UInt64
@@ -68,7 +72,7 @@ final class SQLiteDatabase {
     private var db: OpaquePointer?
 
     init(path: String) throws {
-        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &db, flags, nil) != SQLITE_OK {
             let errMsg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
             throw DatabaseError.openFailed(errMsg)
@@ -329,8 +333,8 @@ actor UsageStore {
                             let stmt = try db.prepare(sql: insertSql)
                             try stmt.bind(index: 1, value: ts)
                             try stmt.bind(index: 2, value: "Primary")
-                            try stmt.bind(index: 3, value: Int64(data.rx))
-                            try stmt.bind(index: 4, value: Int64(data.tx))
+                            try stmt.bind(index: 3, value: Int64(clamping: data.rx))
+                            try stmt.bind(index: 4, value: Int64(clamping: data.tx))
                             _ = stmt.step()
                         }
                         try db.execute(sql: "COMMIT;")
@@ -357,8 +361,8 @@ actor UsageStore {
 
         let stmt = try database.prepare(sql: sql)
         try stmt.bind(index: 1, value: networkName)
-        try stmt.bind(index: 2, value: Int64(bytesReceived))
-        try stmt.bind(index: 3, value: Int64(bytesSent))
+        try stmt.bind(index: 2, value: Int64(clamping: bytesReceived))
+        try stmt.bind(index: 3, value: Int64(clamping: bytesSent))
         try stmt.bind(index: 4, value: Int64(timestamp.timeIntervalSince1970))
 
         if stmt.step() != SQLITE_DONE {
@@ -382,8 +386,8 @@ actor UsageStore {
         let stmt = try database.prepare(sql: sql)
         try stmt.bind(index: 1, value: ts)
         try stmt.bind(index: 2, value: networkName)
-        try stmt.bind(index: 3, value: Int64(bytesReceived))
-        try stmt.bind(index: 4, value: Int64(bytesSent))
+        try stmt.bind(index: 3, value: Int64(clamping: bytesReceived))
+        try stmt.bind(index: 4, value: Int64(clamping: bytesSent))
 
         if stmt.step() != SQLITE_DONE {
             throw DatabaseError.executionFailed("Failed to insert minute row")
@@ -442,8 +446,10 @@ actor UsageStore {
         }
 
         if stmt.step() == SQLITE_ROW {
-            let rx = stmt.columnInt64(index: 0)
-            let tx = stmt.columnInt64(index: 1)
+            // Clamp to 0 before casting to UInt64: a corrupt or negative Int64 value
+            // would wrap to a huge positive number and cause absurd byte counts in the UI.
+            let rx = max(0, stmt.columnInt64(index: 0))
+            let tx = max(0, stmt.columnInt64(index: 1))
             return (UInt64(rx), UInt64(tx))
         }
         return (0, 0)
@@ -479,7 +485,9 @@ actor UsageStore {
         var todayStats: [String: (rx: UInt64, tx: UInt64)] = [:]
         while stmtToday.step() == SQLITE_ROW {
             if let name = stmtToday.columnText(index: 0) {
-                todayStats[name] = (UInt64(stmtToday.columnInt64(index: 1)), UInt64(stmtToday.columnInt64(index: 2)))
+                let rx = max(0, stmtToday.columnInt64(index: 1))
+                let tx = max(0, stmtToday.columnInt64(index: 2))
+                todayStats[name] = (UInt64(rx), UInt64(tx))
             }
         }
 
@@ -500,7 +508,9 @@ actor UsageStore {
         var monthStats: [String: (rx: UInt64, tx: UInt64)] = [:]
         while stmtMonth.step() == SQLITE_ROW {
             if let name = stmtMonth.columnText(index: 0) {
-                monthStats[name] = (UInt64(stmtMonth.columnInt64(index: 1)), UInt64(stmtMonth.columnInt64(index: 2)))
+                let rx = max(0, stmtMonth.columnInt64(index: 1))
+                let tx = max(0, stmtMonth.columnInt64(index: 2))
+                monthStats[name] = (UInt64(rx), UInt64(tx))
             }
         }
 
@@ -584,8 +594,9 @@ actor UsageStore {
         var events: [UsageEvent] = []
         while stmt.step() == SQLITE_ROW {
             let ts = stmt.columnInt64(index: 0)
-            let rx = stmt.columnInt64(index: 1)
-            let tx = stmt.columnInt64(index: 2)
+            // Clamp before UInt64 cast to prevent overflow from corrupt/negative DB values
+            let rx = max(0, stmt.columnInt64(index: 1))
+            let tx = max(0, stmt.columnInt64(index: 2))
             let interval = stmt.columnInt64(index: 3)
 
             events.append(UsageEvent(
@@ -602,13 +613,15 @@ actor UsageStore {
 
     /// Truncates all SQLite tables and vacuums the database to reset all stored metrics.
     func clearAllData() throws {
-        try database.execute(sql: """
-            DELETE FROM network_minutes;
-            DELETE FROM network_hours;
-            DELETE FROM network_days;
-            DELETE FROM network_usage;
-            VACUUM;
-        """)
+        // IMPORTANT: sqlite3_exec with a multi-statement string only runs the FIRST
+        // statement and silently ignores the rest. Each statement must be executed
+        // individually to ensure all tables are actually cleared.
+        try database.execute(sql: "DELETE FROM network_minutes;")
+        try database.execute(sql: "DELETE FROM network_hours;")
+        try database.execute(sql: "DELETE FROM network_days;")
+        try database.execute(sql: "DELETE FROM network_usage;")
+        // VACUUM must run outside any transaction (it commits its own transaction internally)
+        try database.execute(sql: "VACUUM;")
     }
 
     // MARK: – Rollup Retention Jobs

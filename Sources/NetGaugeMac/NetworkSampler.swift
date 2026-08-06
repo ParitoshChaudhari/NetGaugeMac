@@ -58,19 +58,15 @@ final class NetworkSampler: Sendable {
                 continue
             }
 
-            // Safety: verify the pointed-to region is large enough before binding.
-            // ifa_data for AF_LINK interfaces always points to struct if_data on macOS,
-            // but we guard the size defensively.
-            guard MemoryLayout<if_data>.size > 0 else {
-                throw NetworkSamplerError.interfaceDataMalformed
-            }
+
 
             let data = rawData.assumingMemoryBound(to: if_data.self).pointee
             let ifReceived = UInt64(data.ifi_ibytes)
             let ifSent     = UInt64(data.ifi_obytes)
 
             // Interface name: getifaddrs guarantees null termination within IF_NAMESIZE bytes.
-            let name = String(cString: iface.ifa_name)
+            guard let namePtr = iface.ifa_name else { continue }
+            let name = String(cString: namePtr)
 
             // Use saturating addition to prevent silent overflow at ~18 EB totals.
             totalReceived = totalReceived.saturatingAdd(ifReceived)
@@ -106,9 +102,9 @@ final class NetworkSampler: Sendable {
     // MARK: – Helpers
 
     private func isUsable(_ iface: ifaddrs) -> Bool {
-        let flags      = Int32(iface.ifa_flags)
-        let isUp       = flags & IFF_UP       == IFF_UP
-        let isLoopback = flags & IFF_LOOPBACK == IFF_LOOPBACK
+        let flags      = iface.ifa_flags
+        let isUp       = (flags & UInt32(IFF_UP))       == UInt32(IFF_UP)
+        let isLoopback = (flags & UInt32(IFF_LOOPBACK)) == UInt32(IFF_LOOPBACK)
         // AF_LINK sockets carry the if_data statistics we need.
         let hasLinkStats = iface.ifa_addr?.pointee.sa_family == UInt8(AF_LINK)
         return isUp && !isLoopback && hasLinkStats
