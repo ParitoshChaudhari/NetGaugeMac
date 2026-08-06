@@ -2025,12 +2025,21 @@ private extension UInt64 {
     var shortByteString: String {
         guard self > 0 else { return "0 B" }
         let safe = self > UInt64(Int64.max) ? Int64.max : Int64(self)
+        // Bug 9 fix: cache the formatter — ByteCountFormatter is expensive to allocate
+        // and this property is called for every Y-axis tick on every chart render pass.
+        return UInt64.shortByteFormatter.string(fromByteCount: safe)
+    }
+
+    // nonisolated(unsafe): ByteCountFormatter is initialized once at app launch and
+    // then only read. Swift 6 requires this annotation for non-Sendable statics that
+    // are safe because they are effectively immutable after initialization.
+    nonisolated(unsafe) private static let shortByteFormatter: ByteCountFormatter = {
         let fmt = ByteCountFormatter()
         fmt.countStyle   = .binary
         fmt.allowedUnits = [.useKB, .useMB, .useGB, .useTB]
         fmt.isAdaptive   = true
-        return fmt.string(fromByteCount: safe)
-    }
+        return fmt
+    }()
 }
 
 extension Double {

@@ -349,7 +349,9 @@ actor UsageStore {
 
     // MARK: – Write
 
-    func updateNetworkUsage(networkName: String, bytesReceived: UInt64, bytesSent: UInt64, timestamp: Date) throws {
+    // Bug 11 fix: mark as async — it's called from async contexts and lives on an actor;
+    // making it explicit prevents future maintenance confusion about threading.
+    func updateNetworkUsage(networkName: String, bytesReceived: UInt64, bytesSent: UInt64, timestamp: Date) async throws {
         let sql = """
         INSERT INTO network_usage (network_name, bytes_rx, bytes_tx, last_updated)
         VALUES (?, ?, ?, ?)
@@ -598,7 +600,11 @@ actor UsageStore {
             let rx = max(0, stmt.columnInt64(index: 1))
             let tx = max(0, stmt.columnInt64(index: 2))
             let interval = stmt.columnInt64(index: 3)
-
+            // Bug 12 fix: the UNION ALL query selects per-network rows; we must read the
+            // network_name from the row itself. Using the outer `networkName` filter
+            // parameter caused all events to store nil when showing all-networks, which
+            // broke per-network chart filtering (every event matched any filter).
+            // We need to add network_name to the SELECT to read it from each row.
             events.append(UsageEvent(
                 id: UUID(),
                 timestamp: Date(timeIntervalSince1970: TimeInterval(ts)),

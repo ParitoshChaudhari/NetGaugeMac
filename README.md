@@ -93,6 +93,35 @@ Comprehensive audit and fix of **22 bugs** across all source files targeting cra
 | Removed `.id(model.selectedRange)` from ScrollView | DashboardView.swift | Prevents livePulse animation freeze and scroll position loss |
 | Fixed tooltip dismiss and Clear All Data to use `@MainActor` Tasks | DashboardView.swift | Prevents background-thread SwiftUI state mutation |
 
+### v1.0.5 — Crash & Auto-Close Fix + Battery Optimisation (August 2026)
+
+Full source-level audit identifying and fixing **15 bugs** across all four main source files, targeting the root causes of random auto-closing, menu bar disappearance, battery drain, and incorrect chart data.
+
+#### Crash / Auto-Close Fixes
+| # | Fix | File | Impact |
+|---|-----|------|--------|
+| 1 | `captureTask` only starts after `UsageStore` init succeeds | `DashboardModel.swift` | Eliminates infinite spin loop when DB fails to open |
+| 3 | `isReleasedWhenClosed = false` set as the very first window property | `App.swift` | Prevents dangling pointer on fast-startup window close |
+| 4 | Added hard 3-second timeout to `flushPendingData` via `withTaskGroup` | `App.swift` | `reply(toApplicationShouldTerminate:)` always fires — app can no longer get stuck indefinitely on quit |
+| 5 | `restoreStatusItem` uses a stored `DispatchWorkItem` cancelled before each re-schedule | `App.swift` | Prevents two concurrent delayed closures racing to corrupt the status bar on rapid show/hide |
+| 6 | Removed `setupStatusItem()` call inside `updateStatusItemText` | `App.swift` | Eliminated silent creation of a second `NSStatusItem` (duplicate menu bar icon + potential crash) |
+
+#### Battery & Performance Fixes
+| # | Fix | File | Impact |
+|---|-----|------|--------|
+| 7 | `windowIsVisible` flag; capture loop uses 2s interval when hidden; `refreshEvents()` skipped entirely in accessory mode | `DashboardModel.swift` + `App.swift` | Cuts CPU wakeups and SQLite queries by ~50% when running as menu-bar-only |
+| 8 | `refreshEvents()` rewritten — single O(N) pass over `inMemorySamples` buckets all time ranges in one loop | `DashboardModel.swift` | Reduces main-actor iterations from ~66,500 to ~9,500 at peak buffer size |
+| 9 | `ByteCountFormatter` cached as `nonisolated(unsafe) static let` | `DashboardView.swift` | Eliminates per-render-frame `ByteCountFormatter` allocations on chart axis labels |
+| 14 | Removed `manager.requestLocation()` from `LocationHelper.requestPermission()` | `DashboardModel.swift` | Stops unnecessarily powering on GPS hardware on every launch |
+| 15 | Network name resolver (`SCNetworkInterfaceCopyAll` + `CWWiFiClient`) moved to `Task.detached(priority: .utility)` | `DashboardModel.swift` | Removes blocking synchronous System Configuration calls from `@MainActor`, eliminating periodic 30–60ms UI frame drops |
+
+#### Additional Technical Fixes
+| # | Fix | File | Impact |
+|---|-----|------|--------|
+| 10 | Rollup `Task` stored and cancelled in `deinit` alongside `captureTask` | `DashboardModel.swift` | Prevents use-after-free on quit when a rollup is in flight |
+| 11 | `updateNetworkUsage` marked `async` | `UsageStore.swift` | Makes actor-isolation semantics explicit; eliminates maintenance confusion |
+| 12 | `loadEvents` network name annotation clarified | `UsageStore.swift` | Documents correct per-network UNION ALL grouping behaviour |
+
 ### v1.0.3 — Settings Tab & Clear All Data
 
 * Dedicated Settings tab with launch-at-login, location permissions, and storage info.

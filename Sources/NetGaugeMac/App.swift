@@ -26,6 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var isQuittingFromMenu = false
     private var isSystemShuttingDown = false
 
+    // Bug 5 fix: cancel any in-flight restore before scheduling a new one
+    private var pendingRestoreItem: DispatchWorkItem?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
 
@@ -84,20 +87,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func restoreStatusItem() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        // Bug 5 fix: cancel any previously-scheduled restore before scheduling a new one
+        // so rapid show/hide cycles don't race.
+        pendingRestoreItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.statusItem?.isVisible = true
             let dl = self.model.currentDownloadBytesPerSecond
             let ul = self.model.currentUploadBytesPerSecond
             self.updateStatusItemText(download: dl, upload: ul)
         }
+        pendingRestoreItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: item)
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isQuittingFromMenu || isSystemShuttingDown {
-            // Flush any unsaved in-memory samples before the process exits
+            // Bug 4 fix: flush with a hard 3-second timeout.
+            // If flushPendingData() hangs (DB lock, corrupt file), reply is still
+            // called so the process terminates instead of getting stuck indefinitely.
             Task { @MainActor in
-                await model.flushPendingData()
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await self.model.flushPendingData() }
+                    group.addTask {
+                        try? await Task.sleep(for: .seconds(3))
+                    }
+                    // Wait for whichever finishes first
+                    await group.next()
+                    group.cancelAll()
+                }
                 NSApplication.shared.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater
@@ -113,6 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 NSAnimationContext.current.allowsImplicitAnimation = false
                 NSApp.setActivationPolicy(.accessory)
                 self.restoreStatusItem()
+                // Bug 7 (partial): tell model the window is no longer visible
+                self.model.windowIsVisible = false
                 window.orderOut(nil)
                 NSAnimationContext.endGrouping()
             }
@@ -184,13 +204,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
+        // Bug 3 fix: set isReleasedWhenClosed immediately after creation,
+        // before any other configuration or potential display, to prevent
+        // a dangling pointer on window close if the window is shown before
+        // this flag is set.
+        window.isReleasedWhenClosed = false
         window.center()
         window.setFrameAutosaveName("NetGaugeDashboard")
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.title = "NetGauge"
         window.delegate = self
-        window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: contentView)
 
         self.dashboardWindow = window
@@ -206,6 +230,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let window = dashboardWindow {
             NSApp.setActivationPolicy(.regular)
             window.makeKeyAndOrderFront(nil)
+            // Bug 7 (partial): tell model the window is visible so capture loop
+            // can use the faster 1s interval and enable refreshEvents().
+            model.windowIsVisible = true
             if #available(macOS 14.0, *) {
                 NSApp.activate()
             } else {
@@ -215,10 +242,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func updateStatusItemText(download: Double, upload: Double) {
-        if statusItem?.button == nil {
-            setupStatusItem()
-            statusItem?.isVisible = true
-        }
+        // Bug 6 fix: never call setupStatusItem() here — doing so creates a SECOND
+        // NSStatusItem, leaking the original and producing duplicate menu bar icons.
+        // If the button is somehow nil, return early and let the next tick retry.
         guard let button = statusItem?.button else { return }
 
         let dlString = download.speedString
@@ -263,6 +289,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSAnimationContext.current.allowsImplicitAnimation = false
         NSApp.setActivationPolicy(.accessory)
         restoreStatusItem()
+        // Bug 7 (partial): window hidden — switch model to low-power accessory mode
+        model.windowIsVisible = false
         sender.orderOut(nil)
         NSAnimationContext.endGrouping()
         return false
