@@ -88,19 +88,6 @@ final class DashboardModel: ObservableObject {
         }
     }
 
-    // Liquid Glass settings with UserDefaults persistence
-    @Published var isLiquidGlassEnabled: Bool = UserDefaults.standard.bool(forKey: "isLiquidGlassEnabled") {
-        didSet {
-            UserDefaults.standard.set(isLiquidGlassEnabled, forKey: "isLiquidGlassEnabled")
-        }
-    }
-
-    @Published var glassTransparency: Double = (UserDefaults.standard.object(forKey: "glassTransparency") as? Double) ?? 0.35 {
-        didSet {
-            UserDefaults.standard.set(glassTransparency, forKey: "glassTransparency")
-        }
-    }
-
 
     // MARK: Private
     private let sampler = NetworkSampler()

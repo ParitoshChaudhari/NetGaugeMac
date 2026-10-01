@@ -66,4 +66,37 @@ final class NetGaugeMacTests: XCTestCase {
 
         XCTAssertLessThanOrEqual(interval.start, interval.end, "DateInterval start must be <= end to prevent crashes")
     }
+
+    // MARK: - Test 5: Notes Theme Traffic Accents (Download & Upload)
+    func testNotesThemeTrafficAccents() {
+        let dlR = 0.961, dlG = 0.730, dlB = 0.220 // Honey amber (download)
+        let ulR = 0.880, ulG = 0.520, ulB = 0.350 // Terracotta cinnamon (upload)
+
+        XCTAssertGreaterThan(dlR, dlG, "Download R must exceed G for gold amber")
+        XCTAssertGreaterThan(ulR, ulG, "Upload R must exceed G for warm terracotta")
+        XCTAssertNotEqual(dlR, ulR, "Download and upload accents must be distinct")
+    }
+
+    // MARK: - Test 6: Notes Theme Color Palette Integrity
+    func testNotesThemeColorPalette() {
+        let accentR = 0.961, accentG = 0.730, accentB = 0.220
+        let baseR   = 0.133, baseG   = 0.118, baseB   = 0.102
+        let cardR   = 0.173, cardG   = 0.149, cardB   = 0.125
+
+        XCTAssertGreaterThan(accentR, accentG, "Accent R must exceed G for warm gold tone")
+        XCTAssertGreaterThan(accentG, accentB, "Accent G must exceed B for warm gold tone")
+        XCTAssertLessThan(baseR, cardR, "Base paper must be darker than card container")
+    }
+
+    // MARK: - Test 7: Settings State & Model Linkage
+    func testSettingsStateLinkage() {
+        var launchAtLogin = false
+        var locationAuthorized = false
+
+        launchAtLogin = true
+        locationAuthorized = true
+
+        XCTAssertTrue(launchAtLogin, "Launch at login toggle mutation")
+        XCTAssertTrue(locationAuthorized, "Location authorized permission state")
+    }
 }

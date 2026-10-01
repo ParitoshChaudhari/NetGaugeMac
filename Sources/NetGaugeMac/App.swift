@@ -9,7 +9,8 @@ struct NetGaugeMacApp: App {
 
     var body: some Scene {
         Settings {
-            EmptyView()
+            SettingsView()
+                .environmentObject(appDelegate.model)
         }
     }
 }
@@ -21,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     static private(set) var shared: AppDelegate?
 
-    private let model = DashboardModel()
+    let model = DashboardModel()
     private var statusItem: NSStatusItem?
     private var dashboardWindow: NSWindow?
 
@@ -203,8 +204,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openSettingsAction() {
-        model.selectedTab = .settings
-        openDashboardWindow()
+        openSettingsWindow()
+    }
+
+    func openSettingsWindow() {
+        AppLogger.info(.ui, "Opening Settings window")
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+            restoreStatusItem()
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        let selector: Selector
+        if #available(macOS 14.0, *) {
+            selector = Selector(("showSettingsWindow:"))
+        } else {
+            selector = Selector(("showPreferencesWindow:"))
+        }
+        if !NSApp.sendAction(selector, to: nil, from: nil) {
+            DispatchQueue.main.async {
+                NSApp.sendAction(selector, to: nil, from: nil)
+            }
+        }
     }
 
     @objc private func quitAppAction() {
