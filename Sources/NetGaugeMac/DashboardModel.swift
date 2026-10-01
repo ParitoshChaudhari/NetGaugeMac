@@ -833,6 +833,36 @@ final class DashboardModel: ObservableObject {
 
         await refreshEvents()
     }
+
+    /// Flushes in-memory metrics and loads aggregated export report data.
+    func buildExportReport(scope: ExportScope, startDate: Date, endDate: Date) async throws -> ExportReport {
+        await flushPendingData()
+        guard let store else {
+            throw NSError(domain: "NetGauge", code: -1, userInfo: [NSLocalizedDescriptionKey: "Database store unavailable"])
+        }
+
+        let queryStart: Date
+        let queryEnd: Date
+
+        switch scope {
+        case .all:
+            queryStart = Date.distantPast
+            queryEnd = Date.distantFuture
+        case .dateRange:
+            let cal = Calendar.current
+            queryStart = cal.startOfDay(for: min(startDate, endDate))
+            let endDay = max(startDate, endDate)
+            queryEnd = cal.date(bySettingHour: 23, minute: 59, second: 59, of: endDay) ?? endDay
+        }
+
+        let rawRecords = try await store.loadExportData(from: queryStart, to: queryEnd)
+        return DataExportService.shared.buildReport(
+            rawRecords: rawRecords,
+            scope: scope,
+            startDate: scope == .all ? nil : queryStart,
+            endDate: scope == .all ? nil : queryEnd
+        )
+    }
 }
 
 // MARK: - Background network name resolver (Bug 15 fix)

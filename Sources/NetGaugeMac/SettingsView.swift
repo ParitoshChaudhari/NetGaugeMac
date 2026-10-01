@@ -36,6 +36,17 @@ public struct SettingsView: View {
     @State private var crashReports: [[String: Any]] = []
     @State private var didCopiedDiagnostics = false
 
+    // Export Data State
+    @State private var exportScope: ExportScope = .all
+    @State private var exportStartDate: Date = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+    @State private var exportEndDate: Date = Date()
+    @State private var isExporting: Bool = false
+    @State private var exportingFormat: ExportFormat? = nil
+    @State private var exportToastMessage: String? = nil
+    @State private var exportedFileURL: URL? = nil
+    @State private var showExportErrorAlert = false
+    @State private var exportErrorMessage = ""
+
     public init() {}
 
     public var body: some View {
@@ -53,6 +64,8 @@ public struct SettingsView: View {
                     networkCard
 
                     storageCard
+
+                    exportCard
 
                     diagnosticsCard
 
@@ -80,9 +93,49 @@ public struct SettingsView: View {
                 .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
                 .padding(.top, 16)
                 .transition(.move(edge: .top).combined(with: .opacity))
+            } else if let msg = exportToastMessage {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(NotesTheme.green)
+                    Text(msg)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NotesTheme.textPrimary)
+
+                    if let url = exportedFileURL {
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([url])
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "folder")
+                                Text("Reveal in Finder")
+                            }
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(NotesTheme.accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(NotesTheme.accentBg)
+                            .clipShape(Capsule())
+                            .overlay {
+                                Capsule().strokeBorder(NotesTheme.accentBorder, lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(NotesTheme.bgCardHover)
+                .clipShape(Capsule())
+                .overlay {
+                    Capsule().strokeBorder(NotesTheme.green.opacity(0.6), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                .padding(.top, 16)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.snappy(duration: 0.25), value: showSuccessToast)
+        .animation(.snappy(duration: 0.25), value: exportToastMessage)
         .frame(minWidth: 580, idealWidth: 620, maxWidth: 740, minHeight: 600, idealHeight: 700)
         .alert("Clear All Network Data?", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) { }
@@ -96,6 +149,11 @@ public struct SettingsView: View {
             }
         } message: {
             Text("This will permanently delete all recorded network speed and usage history and reset NetGauge to its fresh install state. This action cannot be undone.")
+        }
+        .alert("Export Error", isPresented: $showExportErrorAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(exportErrorMessage)
         }
         .sheet(isPresented: $showCrashReportsSheet) {
             NotesCrashReportsSheet(reports: crashReports)
@@ -294,6 +352,331 @@ public struct SettingsView: View {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appending(path: "NetGaugeMac/netgauge.db").path ?? "Unknown"
+    }
+
+    // MARK: - Card: Export Data
+
+    private var exportCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.up.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(NotesTheme.accent)
+                Text("Export Network Usage Data")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(NotesTheme.textPrimary)
+
+                Spacer()
+
+                Text("PDF · Excel · JSON")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(NotesTheme.accent)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(NotesTheme.accentBg)
+                    .clipShape(Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(NotesTheme.accentBorder, lineWidth: 1)
+                    }
+            }
+
+            NotesTheme.divider.frame(height: 1)
+
+            Text("Export your network usage history with detailed Wi-Fi / Personal Hotspot breakdowns, download & upload statistics, and monthly summaries.")
+                .font(.caption)
+                .foregroundStyle(NotesTheme.textSecondary)
+
+            // Scope Selector: All Data vs Date Range
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Export Scope:")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(NotesTheme.textSecondary)
+
+                HStack(spacing: 10) {
+                    ForEach(ExportScope.allCases) { scope in
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                exportScope = scope
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: exportScope == scope ? "record.circle.fill" : "circle")
+                                    .font(.system(size: 13))
+                                Text(scope.rawValue)
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundStyle(exportScope == scope ? NotesTheme.accent : NotesTheme.textSecondary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(exportScope == scope ? NotesTheme.accentBg : NotesTheme.bgCardHover)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .strokeBorder(exportScope == scope ? NotesTheme.accentBorder : NotesTheme.border, lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Spacer()
+                }
+            }
+
+            // Date Range pickers when .dateRange is chosen
+            if exportScope == .dateRange {
+                HStack(spacing: 16) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("From Date:")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(NotesTheme.textSecondary)
+                        DatePicker("", selection: $exportStartDate, in: ...exportEndDate, displayedComponents: [.date])
+                            .datePickerStyle(.compact)
+                            .labelsHidden()
+                    }
+
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 12))
+                        .foregroundStyle(NotesTheme.textMuted)
+                        .padding(.top, 14)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("To Date:")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(NotesTheme.textSecondary)
+                        DatePicker("", selection: $exportEndDate, in: exportStartDate...Date(), displayedComponents: [.date])
+                            .datePickerStyle(.compact)
+                            .labelsHidden()
+                    }
+
+                    Spacer()
+
+                    // Quick presets
+                    VStack(alignment: .trailing, spacing: 4) {
+                        Text("Presets:")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(NotesTheme.textSecondary)
+                        HStack(spacing: 6) {
+                            presetButton(title: "7D") {
+                                exportStartDate = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+                                exportEndDate = Date()
+                            }
+                            presetButton(title: "30D") {
+                                exportStartDate = Calendar.current.date(byAdding: .day, value: -30, to: Date()) ?? Date()
+                                exportEndDate = Date()
+                            }
+                            presetButton(title: "This Month") {
+                                let start = Calendar.current.dateInterval(of: .month, for: Date())?.start ?? Date()
+                                exportStartDate = start
+                                exportEndDate = Date()
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+                .background(NotesTheme.bgCardHover)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8).strokeBorder(NotesTheme.borderAccent, lineWidth: 1)
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+
+            NotesTheme.divider.frame(height: 1)
+
+            // 3 Format Export Options
+            VStack(spacing: 10) {
+                exportFormatRow(
+                    format: .pdf,
+                    icon: "doc.richtext.fill",
+                    color: NotesTheme.accent,
+                    badge: "PDF Document",
+                    title: "Visual PDF Report (.pdf)",
+                    description: "Formatted document with KPI cards, monthly summaries, Wi-Fi & Hotspot breakdown, and daily details.",
+                    buttonTitle: "Export PDF..."
+                )
+
+                exportFormatRow(
+                    format: .excel,
+                    icon: "tablecells.fill",
+                    color: NotesTheme.green,
+                    badge: "Excel (.xlsx)",
+                    title: "Excel Spreadsheet (.xlsx)",
+                    description: "Multi-sheet workbook with Executive Overview, Monthly Summary, Hotspots, and Daily Records.",
+                    buttonTitle: "Export Excel..."
+                )
+
+                exportFormatRow(
+                    format: .json,
+                    icon: "curlybraces",
+                    color: NotesTheme.upload,
+                    badge: "JSON Archive",
+                    title: "Raw JSON Dataset (.json)",
+                    description: "Structured raw data export for backups, scripting, custom analytics, and data science.",
+                    buttonTitle: "Export JSON..."
+                )
+            }
+
+            if isExporting {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Generating \(exportingFormat?.rawValue ?? "export")...")
+                        .font(.caption)
+                        .foregroundStyle(NotesTheme.accent)
+                }
+                .padding(.top, 4)
+            }
+        }
+        .padding(18)
+        .notesCard()
+    }
+
+    private func presetButton(title: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(NotesTheme.textPrimary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(NotesTheme.bgCard)
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 4).strokeBorder(NotesTheme.border, lineWidth: 1)
+                }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func exportFormatRow(
+        format: ExportFormat,
+        icon: String,
+        color: Color,
+        badge: String,
+        title: String,
+        description: String,
+        buttonTitle: String
+    ) -> some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(color.opacity(0.15))
+                    .frame(width: 40, height: 40)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(color)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(NotesTheme.textPrimary)
+                    Text(badge)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(color)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(color.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+                Text(description)
+                    .font(.caption2)
+                    .foregroundStyle(NotesTheme.textSecondary)
+                    .lineLimit(2)
+            }
+
+            Spacer()
+
+            Button {
+                performExport(format: format)
+            } label: {
+                HStack(spacing: 5) {
+                    if isExporting && exportingFormat == format {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.down.doc.fill")
+                    }
+                    Text(buttonTitle)
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(NotesTheme.textPrimary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(NotesTheme.bgCardHover)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6).strokeBorder(NotesTheme.border, lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(isExporting)
+        }
+        .padding(10)
+        .background(NotesTheme.bgCardHover.opacity(0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func performExport(format: ExportFormat) {
+        Task { @MainActor in
+            isExporting = true
+            exportingFormat = format
+            defer {
+                isExporting = false
+                exportingFormat = nil
+            }
+            do {
+                let report = try await model.buildExportReport(
+                    scope: exportScope,
+                    startDate: exportStartDate,
+                    endDate: exportEndDate
+                )
+
+                let data: Data
+                let ext = format.fileExtension
+                let dateStr: String
+                let df = DateFormatter()
+                df.dateFormat = "yyyy-MM-dd"
+                if exportScope == .all {
+                    dateStr = "All_Data_\(df.string(from: Date()))"
+                } else {
+                    dateStr = "\(df.string(from: exportStartDate))_to_\(df.string(from: exportEndDate))"
+                }
+                let defaultFilename = "NetGauge_\(format == .json ? "Data" : "Report")_\(dateStr).\(ext)"
+
+                switch format {
+                case .pdf:
+                    data = DataExportService.shared.generatePDF(report: report)
+                case .excel:
+                    data = DataExportService.shared.generateExcel(report: report)
+                case .json:
+                    data = try DataExportService.shared.generateJSON(report: report)
+                }
+
+                if let savedURL = try await DataExportService.shared.promptSave(
+                    format: format,
+                    data: data,
+                    defaultFilename: defaultFilename
+                ) {
+                    exportedFileURL = savedURL
+                    withAnimation {
+                        exportToastMessage = "\(format.rawValue) saved to \(savedURL.lastPathComponent)"
+                    }
+                    AppLogger.info(.ui, "Successfully exported \(format.rawValue) to \(savedURL.path)")
+                    Task {
+                        try? await Task.sleep(for: .seconds(6))
+                        await MainActor.run {
+                            withAnimation {
+                                exportToastMessage = nil
+                            }
+                        }
+                    }
+                }
+            } catch {
+                exportErrorMessage = error.localizedDescription
+                showExportErrorAlert = true
+                AppLogger.error(.ui, "Export failed for \(format.rawValue): \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Card 5: Diagnostics & Logs

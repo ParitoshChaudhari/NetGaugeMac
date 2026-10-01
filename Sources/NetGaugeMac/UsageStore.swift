@@ -683,6 +683,68 @@ actor UsageStore {
         return events
     }
 
+    /// Fetches all granular network traffic records across all retention tiers for export reporting.
+    func loadExportData(from startDate: Date, to endDate: Date) throws -> [ExportRawRecord] {
+        let startTs = Int64(startDate.timeIntervalSince1970)
+        let endTs   = Int64(endDate.timeIntervalSince1970)
+
+        let sql = """
+        SELECT ts, network_name, bytes_rx, bytes_tx FROM (
+            SELECT ts, network_name, bytes_rx, bytes_tx FROM network_minutes WHERE ts >= ? AND ts <= ?
+            UNION ALL
+            SELECT ts, network_name, bytes_rx, bytes_tx FROM network_hours WHERE ts >= ? AND ts <= ?
+            UNION ALL
+            SELECT ts, network_name, bytes_rx, bytes_tx FROM network_days WHERE ts >= ? AND ts <= ?
+        ) ORDER BY ts ASC;
+        """
+
+        let stmt = try database.prepare(sql: sql)
+        try stmt.bind(index: 1, value: startTs)
+        try stmt.bind(index: 2, value: endTs)
+        try stmt.bind(index: 3, value: startTs)
+        try stmt.bind(index: 4, value: endTs)
+        try stmt.bind(index: 5, value: startTs)
+        try stmt.bind(index: 6, value: endTs)
+
+        var records: [ExportRawRecord] = []
+        while stmt.step() == SQLITE_ROW {
+            let ts = stmt.columnInt64(index: 0)
+            let netName = stmt.columnText(index: 1) ?? "Primary"
+            let rx = max(0, stmt.columnInt64(index: 2))
+            let tx = max(0, stmt.columnInt64(index: 3))
+            records.append(ExportRawRecord(
+                timestamp: Date(timeIntervalSince1970: TimeInterval(ts)),
+                networkName: netName,
+                bytesRx: UInt64(rx),
+                bytesTx: UInt64(tx)
+            ))
+        }
+
+        // Fallback: If no granular records exist (e.g. freshly imported or rolled up), check network_usage table
+        if records.isEmpty {
+            let sqlFallback = "SELECT network_name, bytes_rx, bytes_tx, last_updated FROM network_usage;"
+            if let fallbackStmt = try? database.prepare(sql: sqlFallback) {
+                while fallbackStmt.step() == SQLITE_ROW {
+                    let name = fallbackStmt.columnText(index: 0) ?? "Primary"
+                    let rx = max(0, fallbackStmt.columnInt64(index: 1))
+                    let tx = max(0, fallbackStmt.columnInt64(index: 2))
+                    let ts = fallbackStmt.columnInt64(index: 3)
+                    let d = Date(timeIntervalSince1970: TimeInterval(ts))
+                    if d >= startDate && d <= endDate {
+                        records.append(ExportRawRecord(
+                            timestamp: d,
+                            networkName: name,
+                            bytesRx: UInt64(rx),
+                            bytesTx: UInt64(tx)
+                        ))
+                    }
+                }
+            }
+        }
+
+        return records
+    }
+
     /// Truncates all SQLite tables and vacuums the database to reset all stored metrics.
     func clearAllData() throws {
         // IMPORTANT: sqlite3_exec with a multi-statement string only runs the FIRST
