@@ -1179,6 +1179,9 @@ struct DashboardView: View {
                 .padding(20)
                 .ngCard()
 
+                // Card: Diagnostics & Logs
+                DiagnosticsCard()
+
                 // Card 4: Danger Zone (Reset / Clear All Data)
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
@@ -1267,6 +1270,296 @@ struct DashboardView: View {
         if bytes >= 1_048_576    { return "MB" }
         if bytes >= 1_024        { return "KB" }
         return "B"
+    }
+}
+
+// MARK: - Diagnostics Card
+
+/// Settings card that surfaces logging and crash diagnostics to the user.
+/// All log access uses Apple's Unified Logging System — no raw file reads for logs.
+private struct DiagnosticsCard: View {
+
+    @State private var showCrashReportsSheet = false
+    @State private var crashReports: [[String: Any]] = []
+    @State private var didCopiedDiagnostics = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "stethoscope")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                        Text("Diagnostics & Logs")
+                            .font(.system(size: 16, weight: .semibold))
+                    }
+                    Text("Access system logs, crash reports, and diagnostic information.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+
+            Divider()
+
+            // Open System Logs
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("System Logs")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Open Console.app filtered to NetGauge — shows all logged events, errors, and faults.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    openSystemLogs()
+                } label: {
+                    Label("Open Logs", systemImage: "doc.text.magnifyingglass")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+            }
+
+            Divider()
+
+            // Crash Reports
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    let count = CrashGuard.existingCrashReports().count
+                    Text("Crash Reports")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(count == 0
+                         ? "No crash reports on disk — app running stably."
+                         : "\(count) crash report\(count == 1 ? "" : "s") from recent session\(count == 1 ? "" : "s").")
+                        .font(.caption)
+                        .foregroundStyle(count == 0 ? Color.secondary : Color.orange)
+                }
+                Spacer()
+                if !CrashGuard.existingCrashReports().isEmpty {
+                    Button {
+                        crashReports = CrashGuard.existingCrashReports()
+                        showCrashReportsSheet = true
+                    } label: {
+                        Label("View Reports", systemImage: "exclamationmark.triangle")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.orange)
+                }
+            }
+
+            Divider()
+
+            // Copy Diagnostic Report
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Diagnostic Report")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Copy a structured summary (app version, OS, crash context) to share with support.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    copyDiagnosticReport()
+                } label: {
+                    Label(didCopiedDiagnostics ? "Copied!" : "Copy Report",
+                          systemImage: didCopiedDiagnostics ? "checkmark" : "doc.on.clipboard")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.bordered)
+                .tint(didCopiedDiagnostics ? .green : .primary)
+            }
+        }
+        .padding(20)
+        .ngCard()
+        .sheet(isPresented: $showCrashReportsSheet) {
+            CrashReportsSheet(reports: crashReports)
+        }
+    }
+
+    // MARK: - Actions
+
+    private func openSystemLogs() {
+        // Opens Console.app pre-filtered to NetGauge's subsystem identifier
+        let subsystem = "com.paritoshchaudhari.NetGaugeMac"
+        let escapedSubsystem = subsystem.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? subsystem
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Console"),
+           NSWorkspace.shared.open(url) {
+            return
+        }
+        // Fallback: open Console.app directly
+        let consoleURL = URL(fileURLWithPath: "/System/Applications/Utilities/Console.app")
+        let config = NSWorkspace.OpenConfiguration()
+        config.arguments = ["--predicate", "subsystem == \"\(escapedSubsystem)\""]
+        NSWorkspace.shared.openApplication(at: consoleURL, configuration: config)
+        AppLogger.info(.ui, "User opened System Logs from Diagnostics panel")
+    }
+
+    private func copyDiagnosticReport() {
+        let version  = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build    = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let os       = ProcessInfo.processInfo.operatingSystemVersionString
+        let reports  = CrashGuard.existingCrashReports()
+        let ctx      = AppLogger.readLastCrashContext()
+
+        var lines: [String] = [
+            "=== NetGauge Diagnostic Report ===",
+            "App Version : \(version) (\(build))",
+            "macOS       : \(os)",
+            "Generated   : \(Date())",
+            "",
+            "--- Crash Reports on Disk: \(reports.count) ---"
+        ]
+        for report in reports.prefix(5) {
+            if let type = report["type"] as? String,
+               let ts   = report["timestamp"] as? String {
+                let sig = report["signal"] as? String ?? report["exceptionName"] as? String ?? "?"
+                lines.append("  [\(ts)] type=\(type) signal/exception=\(sig)")
+            }
+        }
+        if let ctx {
+            lines.append("")
+            lines.append("--- Last Fault Context ---")
+            lines.append("  Category : \(ctx.category)")
+            lines.append("  Message  : \(ctx.message)")
+            lines.append("  At       : \(ctx.timestamp)")
+            lines.append("  Version  : \(ctx.appVersion)")
+        }
+        lines.append("")
+        lines.append("To view full logs: open Console.app and filter by subsystem 'com.paritoshchaudhari.NetGaugeMac'")
+        lines.append("Or run: log stream --predicate 'subsystem == \"com.paritoshchaudhari.NetGaugeMac\"'")
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+
+        AppLogger.info(.ui, "User copied diagnostic report to clipboard")
+        withAnimation { didCopiedDiagnostics = true }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            await MainActor.run { withAnimation { didCopiedDiagnostics = false } }
+        }
+    }
+}
+
+// MARK: - Crash Reports Sheet
+
+private struct CrashReportsSheet: View {
+    let reports: [[String: Any]]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label("Crash Reports", systemImage: "exclamationmark.triangle.fill")
+                        .font(.title2.bold())
+                        .foregroundStyle(.orange)
+                    Text("Recent crash reports from Application Support. Re-raised to OS for .crash file generation.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Done") { dismiss() }
+                    .buttonStyle(.borderedProminent)
+            }
+            .padding(20)
+
+            Divider()
+
+            if reports.isEmpty {
+                ContentUnavailableView(
+                    "No Crash Reports",
+                    systemImage: "checkmark.circle",
+                    description: Text("No crash reports on disk — the app is running stably.")
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(Array(reports.enumerated()), id: \.offset) { _, report in
+                            CrashReportRow(report: report)
+                        }
+                    }
+                    .padding(16)
+                }
+            }
+        }
+        .frame(minWidth: 560, minHeight: 400)
+    }
+}
+
+private struct CrashReportRow: View {
+    let report: [String: Any]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                let type = report["type"] as? String ?? "unknown"
+                Label(type == "signal" ? "Signal Crash" : "Exception Crash",
+                      systemImage: type == "signal" ? "bolt.trianglebadge.exclamationmark.fill" : "xmark.octagon.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.orange)
+                Spacer()
+                if let ts = report["timestamp"] as? String {
+                    Text(ts)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                if let sig = report["signal"] as? String {
+                    reportRow(label: "Signal", value: sig)
+                }
+                if let exc = report["exceptionName"] as? String {
+                    reportRow(label: "Exception", value: exc)
+                }
+                if let reason = report["reason"] as? String {
+                    reportRow(label: "Reason", value: reason)
+                }
+                if let version = report["appVersion"] as? String {
+                    reportRow(label: "App Version", value: version)
+                }
+                if let os = report["osVersion"] as? String {
+                    reportRow(label: "macOS", value: os)
+                }
+                if let pid = report["pid"] {
+                    reportRow(label: "PID", value: "\(pid)")
+                }
+            }
+            if let callStack = report["callStack"] as? [String], !callStack.isEmpty {
+                DisclosureGroup("Call Stack (\(callStack.count) frames)") {
+                    Text(callStack.joined(separator: "\n"))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .padding(.top, 4)
+                }
+                .font(.caption.weight(.medium))
+            }
+        }
+        .padding(14)
+        .background(Color.orange.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay { RoundedRectangle(cornerRadius: 10).strokeBorder(Color.orange.opacity(0.2), lineWidth: 1) }
+    }
+
+    private func reportRow(label: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(label + ":")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .trailing)
+            Text(value)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+        }
     }
 }
 

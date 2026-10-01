@@ -75,13 +75,22 @@ final class SQLiteDatabase {
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
         if sqlite3_open_v2(path, &db, flags, nil) != SQLITE_OK {
             let errMsg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+            AppLogger.fault(.store, "sqlite3_open_v2 failed at path '\(path)': \(errMsg)")
             throw DatabaseError.openFailed(errMsg)
         }
 
         sqlite3_busy_timeout(db, 5000)
 
-        // Enable Write-Ahead Logging (WAL) mode for crash safety
+        // Enable Write-Ahead Logging (WAL) mode for crash safety.
+        // WAL allows readers and the writer to proceed concurrently without blocking.
         try execute(sql: "PRAGMA journal_mode=WAL;")
+
+        // NORMAL sync: fsync after each WAL checkpoint (not after every write).
+        // Provides excellent crash safety with better write throughput than FULL.
+        try execute(sql: "PRAGMA synchronous=NORMAL;")
+
+        // Enforce referential integrity at the SQLite level.
+        try execute(sql: "PRAGMA foreign_keys=ON;")
     }
 
     deinit {
@@ -216,7 +225,53 @@ actor UsageStore {
             }
         }
 
-        let db = try SQLiteDatabase(path: dbURL.path)
+        // Attempt to open existing DB; if it cannot be opened, recover by moving it aside.
+        var db: SQLiteDatabase
+        do {
+            db = try SQLiteDatabase(path: dbURL.path)
+        } catch {
+            // DB failed to open — move aside and start fresh to prevent crash loop
+            let ts = Int(Date().timeIntervalSince1970)
+            let corruptURL = appDir.appending(path: "netgauge.db.corrupt.\(ts)")
+            AppLogger.fault(.store, "Database failed to open — moving to \(corruptURL.lastPathComponent) and starting fresh: \(error.localizedDescription)")
+            try? FileManager.default.moveItem(at: dbURL, to: corruptURL)
+            // Also move WAL/SHM files
+            for suffix in ["-wal", "-shm"] {
+                let src = appDir.appending(path: "netgauge.db\(suffix)")
+                let dst = appDir.appending(path: "netgauge.db.corrupt.\(ts)\(suffix)")
+                try? FileManager.default.moveItem(at: src, to: dst)
+            }
+            db = try SQLiteDatabase(path: dbURL.path)
+        }
+
+        // Integrity check — detects corruption from unexpected shutdowns or storage errors.
+        // On failure: rename the corrupt DB and open a fresh one.
+        do {
+            let integrityStmt = try db.prepare(sql: "PRAGMA integrity_check;")
+            if integrityStmt.step() == SQLITE_ROW,
+               let result = integrityStmt.columnText(index: 0) {
+                if result == "ok" {
+                    AppLogger.info(.store, "Database integrity check: OK")
+                } else {
+                    let ts = Int(Date().timeIntervalSince1970)
+                    let corruptURL = appDir.appending(path: "netgauge.db.corrupt.\(ts)")
+                    AppLogger.fault(.store, "Database integrity check FAILED ('\(result)') — moving to \(corruptURL.lastPathComponent) and starting fresh")
+                    // Nullify current db before moving (close it)
+                    try? db.execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+                    try? FileManager.default.moveItem(at: dbURL, to: corruptURL)
+                    for suffix in ["-wal", "-shm"] {
+                        let src = appDir.appending(path: "netgauge.db\(suffix)")
+                        let dst = appDir.appending(path: "netgauge.db.corrupt.\(ts)\(suffix)")
+                        try? FileManager.default.moveItem(at: src, to: dst)
+                    }
+                    db = try SQLiteDatabase(path: dbURL.path)
+                    AppLogger.info(.store, "Fresh database created after corruption recovery")
+                }
+            }
+        } catch {
+            AppLogger.error(.store, "Could not run integrity_check: \(error.localizedDescription)")
+        }
+
         self.database = db
 
         // Check schema migration
@@ -242,9 +297,14 @@ actor UsageStore {
         }
 
         if needsMigration {
-            try? db.execute(sql: "ALTER TABLE network_minutes RENAME TO old_network_minutes;")
-            try? db.execute(sql: "ALTER TABLE network_hours RENAME TO old_network_hours;")
-            try? db.execute(sql: "ALTER TABLE network_days RENAME TO old_network_days;")
+            AppLogger.info(.store, "Schema migration required — renaming legacy tables")
+            do {
+                try db.execute(sql: "ALTER TABLE network_minutes RENAME TO old_network_minutes;")
+                try db.execute(sql: "ALTER TABLE network_hours RENAME TO old_network_hours;")
+                try db.execute(sql: "ALTER TABLE network_days RENAME TO old_network_days;")
+            } catch {
+                AppLogger.error(.store, "Schema migration rename failed: \(error.localizedDescription)")
+            }
         }
 
         // Create retention tables
@@ -279,27 +339,32 @@ actor UsageStore {
         """)
 
         if needsMigration {
-            try? db.execute(sql: """
-                BEGIN TRANSACTION;
-                INSERT INTO network_minutes (ts, network_name, bytes_rx, bytes_tx)
-                SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_minutes;
-                
-                INSERT INTO network_hours (ts, network_name, bytes_rx, bytes_tx)
-                SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_hours;
-                
-                INSERT INTO network_days (ts, network_name, bytes_rx, bytes_tx)
-                SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_days;
-                COMMIT;
-            """)
-            
-            try? db.execute(sql: "DROP TABLE IF EXISTS old_network_minutes;")
-            try? db.execute(sql: "DROP TABLE IF EXISTS old_network_hours;")
-            try? db.execute(sql: "DROP TABLE IF EXISTS old_network_days;")
+            do {
+                try db.execute(sql: """
+                    BEGIN TRANSACTION;
+                    INSERT INTO network_minutes (ts, network_name, bytes_rx, bytes_tx)
+                    SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_minutes;
+                    
+                    INSERT INTO network_hours (ts, network_name, bytes_rx, bytes_tx)
+                    SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_hours;
+                    
+                    INSERT INTO network_days (ts, network_name, bytes_rx, bytes_tx)
+                    SELECT ts, 'Primary', bytes_rx, bytes_tx FROM old_network_days;
+                    COMMIT;
+                """)
+                try db.execute(sql: "DROP TABLE IF EXISTS old_network_minutes;")
+                try db.execute(sql: "DROP TABLE IF EXISTS old_network_hours;")
+                try db.execute(sql: "DROP TABLE IF EXISTS old_network_days;")
+                AppLogger.info(.store, "Schema migration complete")
+            } catch {
+                AppLogger.error(.store, "Schema migration data copy failed: \(error.localizedDescription)")
+            }
         }
 
         // Auto-migrate from JSONL if exists
         let jsonlURL = appDir.appending(path: "usage-events.jsonl")
         if FileManager.default.fileExists(atPath: jsonlURL.path) {
+            AppLogger.info(.store, "Legacy JSONL file found — migrating to SQLite")
             do {
                 let data = try Data(contentsOf: jsonlURL, options: .mappedIfSafe)
                 if let text = String(data: data, encoding: .utf8) {
@@ -338,11 +403,12 @@ actor UsageStore {
                             _ = stmt.step()
                         }
                         try db.execute(sql: "COMMIT;")
+                        AppLogger.info(.store, "JSONL migration complete — \(jsonlEvents.count) events imported")
                     }
                 }
                 try FileManager.default.removeItem(at: jsonlURL)
             } catch {
-                print("Failed to migrate JSONL data: \(error)")
+                AppLogger.error(.store, "JSONL migration failed: \(error.localizedDescription)")
             }
         }
     }
@@ -634,8 +700,12 @@ actor UsageStore {
 
     func performRollups() throws {
         let now = Date()
-        try rollupMinutesToHours(olderThan: now.addingTimeInterval(-7 * 24 * 60 * 60))
-        try rollupHoursToDays(olderThan: now.addingTimeInterval(-90 * 24 * 60 * 60))
+        let hourCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
+        let dayCutoff  = now.addingTimeInterval(-90 * 24 * 60 * 60)
+        AppLogger.info(.store, "performRollups — rolling minutes older than \(hourCutoff) to hours, hours older than \(dayCutoff) to days")
+        try rollupMinutesToHours(olderThan: hourCutoff)
+        try rollupHoursToDays(olderThan: dayCutoff)
+        AppLogger.info(.store, "performRollups complete")
     }
 
     private func rollupMinutesToHours(olderThan limitDate: Date) throws {

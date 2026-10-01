@@ -41,6 +41,7 @@ final class NetworkSampler: Sendable {
     func snapshot() throws -> NetworkSnapshot {
         var ifList: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&ifList) == 0, let head = ifList else {
+            AppLogger.error(.network, "getifaddrs failed — cannot sample network interfaces")
             throw NetworkSamplerError.interfaceReadFailed
         }
         defer { freeifaddrs(ifList) }   // always freed even on early throw
@@ -89,6 +90,10 @@ final class NetworkSampler: Sendable {
                     bytesSent: ifSent
                 )
             }
+        }
+
+        if interfaceTotals.isEmpty {
+            AppLogger.notice(.network, "NetworkSampler: zero usable interfaces found — network stack may be unavailable or all interfaces filtered")
         }
 
         return NetworkSnapshot(

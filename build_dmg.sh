@@ -13,7 +13,7 @@ set -euo pipefail
 # ── Config ───────────────────────────────────────────────────
 APP_BUNDLE="NetGaugeMac.app"
 DMG_NAME="NetGaugeMac"
-VERSION="1.0.0"
+VERSION="1.0.6"
 OUTPUT_DMG="${DMG_NAME}.dmg"
 TMP_DMG="${DMG_NAME}-tmp.dmg"
 

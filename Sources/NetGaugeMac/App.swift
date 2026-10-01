@@ -1,7 +1,9 @@
 import AppKit
 import SwiftUI
 
-@main
+// NOTE: @main is intentionally absent here.
+// The entry point is in NetGaugeMacMain.swift so CrashGuard can be
+// installed before NSApplication initialises.
 struct NetGaugeMacApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -31,6 +33,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Self.shared = self
+
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let build   = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        let os      = ProcessInfo.processInfo.operatingSystemVersionString
+        AppLogger.info(.lifecycle, "App launched — version \(version) (\(build)), macOS \(os)")
 
         // Set dynamic application icon
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
@@ -68,21 +75,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Check system uptime. If < 120s, start hidden in the Menu Bar
             let uptime = self.getSystemUptime()
             if uptime < 120.0 {
+                AppLogger.info(.lifecycle, "System recently booted (uptime \(Int(uptime))s) — starting as menu-bar accessory")
                 NSApp.setActivationPolicy(.accessory)
                 self.restoreStatusItem()
             } else {
+                AppLogger.info(.lifecycle, "Normal launch — opening dashboard window")
                 self.openDashboardWindow()
             }
         }
     }
 
+    func applicationDidBecomeActive(_ notification: Notification) {
+        AppLogger.debug(.lifecycle, "App became active")
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        AppLogger.debug(.lifecycle, "App resigned active")
+    }
+
     @objc private func handlePowerOff(_ notification: Notification) {
         Task { @MainActor in
+            AppLogger.info(.lifecycle, "System power-off / logout detected — preparing graceful shutdown")
             self.isSystemShuttingDown = true
         }
     }
 
     @objc private func handleWakeFromSleep(_ notification: Notification) {
+        AppLogger.info(.lifecycle, "System woke from sleep — restoring status item")
         restoreStatusItem()
     }
 
@@ -103,6 +122,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if isQuittingFromMenu || isSystemShuttingDown {
+            let reason = isQuittingFromMenu ? "user quit from menu" : "system shutdown/logout"
+            AppLogger.info(.lifecycle, "App terminating — reason: \(reason)")
             // Bug 4 fix: flush with a hard 3-second timeout.
             // If flushPendingData() hangs (DB lock, corrupt file), reply is still
             // called so the process terminates instead of getting stuck indefinitely.
@@ -116,6 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     await group.next()
                     group.cancelAll()
                 }
+                AppLogger.info(.lifecycle, "Flush complete — replying terminateNow")
                 NSApplication.shared.reply(toApplicationShouldTerminate: true)
             }
             return .terminateLater
@@ -124,6 +146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Cancel any in-flight SwiftUI/AppKit animations before hiding the window.
             // Without this, a spring animation on AppTabPicker (VisualEffectView pill)
             // can race with orderOut and corrupt SwiftUI state, causing a crash.
+            AppLogger.info(.lifecycle, "Quit intercepted — hiding window and staying alive as menu-bar accessory")
             DispatchQueue.main.async { [weak self] in
                 guard let self, let window = self.dashboardWindow else { return }
                 NSAnimationContext.beginGrouping()
@@ -148,6 +171,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Open the window when the user clicks the Dock icon.
         // Return false to signal we handled it ourselves; returning true would let
         // AppKit attempt its own reopen handling and potentially open a second window.
+        AppLogger.debug(.lifecycle, "App reopen requested (hasVisibleWindows: \(flag))")
         openDashboardWindow()
         return false
     }
@@ -170,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitAppAction), keyEquivalent: "q"))
 
         statusItem?.menu = menu
+        AppLogger.debug(.ui, "Status bar item created")
     }
 
     @objc private func openDashboardAction() {
@@ -193,6 +218,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func createDashboardWindow() {
         guard dashboardWindow == nil else { return }
+
+        AppLogger.info(.ui, "Creating dashboard window")
 
         let contentView = DashboardView()
             .environmentObject(model)
@@ -220,7 +247,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         self.dashboardWindow = window
 
         Task {
-            await model.start()
+            // Resilience: guard model startup with a 10-second timeout
+            let didStart = await withTaskGroup(of: Bool.self) { group in
+                group.addTask {
+                    await self.model.start()
+                    return true
+                }
+                group.addTask {
+                    try? await Task.sleep(for: .seconds(10))
+                    return false
+                }
+                let result = await group.next() ?? false
+                group.cancelAll()
+                return result
+            }
+            if !didStart {
+                AppLogger.fault(.lifecycle, "model.start() did not complete within 10 seconds — possible DB deadlock or filesystem stall")
+            } else {
+                AppLogger.info(.lifecycle, "model.start() completed successfully")
+            }
         }
     }
 
@@ -233,6 +278,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Bug 7 (partial): tell model the window is visible so capture loop
             // can use the faster 1s interval and enable refreshEvents().
             model.windowIsVisible = true
+            AppLogger.debug(.ui, "Dashboard window opened")
             if #available(macOS 14.0, *) {
                 NSApp.activate()
             } else {
@@ -284,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         // Intercept close button and hide the window instead of destroying it.
         // Cancel in-flight animations first to prevent VisualEffectView crash.
+        AppLogger.debug(.ui, "Dashboard window close intercepted — hiding instead")
         NSAnimationContext.beginGrouping()
         NSAnimationContext.current.duration = 0
         NSAnimationContext.current.allowsImplicitAnimation = false
@@ -329,7 +376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .applicationIcon: logo,
             .credits: credits,
             .applicationName: "NetGauge",
-            .version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
+            .version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
         ]
 
         NSApplication.shared.orderFrontStandardAboutPanel(options: options)
@@ -346,6 +393,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let bootDate = Date(timeIntervalSince1970: Double(bootTime.tv_sec) + Double(bootTime.tv_usec) / 1_000_000.0)
             return Date().timeIntervalSince(bootDate)
         }
+        AppLogger.error(.app, "sysctl KERN_BOOTTIME failed — defaulting to 999s uptime")
         return 999.0
     }
 }

@@ -128,29 +128,57 @@ final class DashboardModel: ObservableObject {
     // MARK: – Lifecycle
 
     func start() async {
-        guard captureTask == nil else { return }
+        guard captureTask == nil else {
+            AppLogger.notice(.lifecycle, "DashboardModel.start() called but captureTask already running — ignoring")
+            return
+        }
+
+        AppLogger.info(.lifecycle, "DashboardModel starting — initialising database and capture loop")
 
         // Request Location permission so we can read Wi-Fi SSID
         LocationHelper.shared.requestPermission()
 
-        do {
-            let newStore = try UsageStore()
-            store = newStore
-            await refreshEvents()
+        // Resilience: retry DB open once after 2 seconds if first attempt fails.
+        // Handles transient file-lock conditions during early system boot.
+        var openError: Error? = nil
+        for attempt in 1...2 {
+            do {
+                let newStore = try UsageStore()
+                store = newStore
+                AppLogger.info(.store, "Database opened successfully on attempt \(attempt)")
+                await refreshEvents()
 
-            // Run database rollup jobs on startup
-            Task {
-                try? await newStore.performRollups()
-            }
+                // Run database rollup jobs on startup
+                Task {
+                    do {
+                        try await newStore.performRollups()
+                        AppLogger.info(.store, "Startup rollups complete")
+                    } catch {
+                        AppLogger.error(.store, "Startup rollup failed: \(error.localizedDescription)")
+                    }
+                }
 
-            // Bug 1 fix: only start captureTask after the store is successfully
-            // initialised. Previously the task was started unconditionally, meaning
-            // it would spin forever making no-op DB writes when store == nil.
-            captureTask = Task { [weak self] in
-                await self?.captureLoop()
+                // Bug 1 fix: only start captureTask after the store is successfully
+                // initialised. Previously the task was started unconditionally, meaning
+                // it would spin forever making no-op DB writes when store == nil.
+                captureTask = Task { [weak self] in
+                    await self?.captureLoop()
+                }
+                openError = nil
+                break
+            } catch {
+                openError = error
+                AppLogger.error(.store, "Database open attempt \(attempt) failed: \(error.localizedDescription)")
+                if attempt == 1 {
+                    AppLogger.notice(.store, "Retrying database open in 2 seconds…")
+                    try? await Task.sleep(for: .seconds(2))
+                }
             }
-        } catch {
-            storeError = error.localizedDescription
+        }
+
+        if let err = openError {
+            AppLogger.fault(.store, "Database permanently unavailable after 2 attempts: \(err.localizedDescription)")
+            storeError = err.localizedDescription
         }
 
         checkLaunchAtLoginStatus()
@@ -320,8 +348,8 @@ final class DashboardModel: ObservableObject {
                 return $0.totalBytes > $1.totalBytes
             }
         } catch {
+            AppLogger.error(.store, "refreshEvents failed: \(error.localizedDescription)")
             storeError = error.localizedDescription
-
         }
     }
 
@@ -419,8 +447,14 @@ final class DashboardModel: ObservableObject {
     }
 
     private func captureLoop() async {
+        AppLogger.info(.network, "Capture loop started")
         while !Task.isCancelled {
+            // Signpost for Instruments profiling — visible as a timeline interval
+            let signpostID = NGSignposter.captureLoop.makeSignpostID()
+            let state = NGSignposter.captureLoop.beginInterval("captureOnce", id: signpostID)
             await captureOnce()
+            NGSignposter.captureLoop.endInterval("captureOnce", state)
+
             // Bug 7 fix: use a 2-second interval when the window is hidden
             // (menu-bar-only / accessory mode) to reduce CPU wakeups and battery drain.
             // The status bar speed text only needs ~1Hz when the dashboard is open.
@@ -428,11 +462,14 @@ final class DashboardModel: ObservableObject {
             do {
                 try await Task.sleep(for: interval)
             } catch is CancellationError {
+                AppLogger.info(.network, "Capture loop cancelled — shutting down cleanly")
                 return
             } catch {
-                // Continue on unexpected sleep error
+                // Unexpected sleep error — log and continue rather than silently swallowing
+                AppLogger.error(.network, "Unexpected error in capture loop sleep: \(error.localizedDescription)")
             }
         }
+        AppLogger.info(.network, "Capture loop exited (task cancelled)")
     }
 
     private func captureOnce() async {
@@ -475,6 +512,7 @@ final class DashboardModel: ObservableObject {
                         // Force-flush to DB when approaching the cap to prevent data loss.
                         if inMemorySamples.count >= 9_500 {
                             // About to hit cap — flush all current samples immediately
+                            AppLogger.notice(.network, "In-memory sample cap reached (\(inMemorySamples.count)) — force-flushing to DB")
                             let calFlush = Calendar.current
                             struct ForceGroupKey: Hashable {
                                 let minStart: Date
@@ -490,7 +528,11 @@ final class DashboardModel: ObservableObject {
                             }
                             for (key, data) in forceGrouped {
                                 if let store {
-                                    try? await store.insertMinute(timestamp: key.minStart, networkName: key.networkName, bytesReceived: data.rx, bytesSent: data.tx)
+                                    do {
+                                        try await store.insertMinute(timestamp: key.minStart, networkName: key.networkName, bytesReceived: data.rx, bytesSent: data.tx)
+                                    } catch {
+                                        AppLogger.error(.store, "Force-flush insertMinute failed: \(error.localizedDescription)")
+                                    }
                                 }
                             }
                             inMemorySamples.removeAll()
@@ -535,6 +577,7 @@ final class DashboardModel: ObservableObject {
                         do {
                             try await store.insertMinute(timestamp: key.minStart, networkName: key.networkName, bytesReceived: data.rx, bytesSent: data.tx)
                         } catch {
+                            AppLogger.error(.store, "insertMinute failed for network '\(key.networkName)': \(error.localizedDescription)")
                             storeError = error.localizedDescription
                         }
                     }
@@ -546,6 +589,7 @@ final class DashboardModel: ObservableObject {
                         do {
                             try await store.updateNetworkUsage(networkName: netName, bytesReceived: data.rx, bytesSent: data.tx, timestamp: snapshot.capturedAt)
                         } catch {
+                            AppLogger.error(.store, "updateNetworkUsage failed for network '\(netName)': \(error.localizedDescription)")
                             storeError = error.localizedDescription
                         }
                     }
@@ -577,13 +621,20 @@ final class DashboardModel: ObservableObject {
             // Periodically check/run rollups (hourly)
             if now.timeIntervalSince(lastRollupTime) > 3600 {
                 lastRollupTime = now
+                AppLogger.info(.store, "Starting hourly rollup")
                 // Bug 10 fix: store the task handle so it can be cancelled in deinit
                 rollupTask?.cancel()
                 rollupTask = Task {
-                    try? await store?.performRollups()
+                    do {
+                        try await store?.performRollups()
+                        AppLogger.info(.store, "Hourly rollup complete")
+                    } catch {
+                        AppLogger.error(.store, "Hourly rollup failed: \(error.localizedDescription)")
+                    }
                 }
             }
         } catch {
+            AppLogger.error(.network, "captureOnce failed — resetting speed display: \(error.localizedDescription)")
             currentDownloadBytesPerSecond = 0
             currentUploadBytesPerSecond   = 0
         }
@@ -684,7 +735,7 @@ final class DashboardModel: ObservableObject {
                     }
                 }
             } catch {
-                print("Failed to toggle login item status: \(error)")
+                AppLogger.error(.app, "Failed to toggle launch-at-login (enabled=\(enabled)): \(error.localizedDescription)")
             }
         }
     }

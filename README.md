@@ -93,6 +93,31 @@ Comprehensive audit and fix of **22 bugs** across all source files targeting cra
 | Removed `.id(model.selectedRange)` from ScrollView | DashboardView.swift | Prevents livePulse animation freeze and scroll position loss |
 | Fixed tooltip dismiss and Clear All Data to use `@MainActor` Tasks | DashboardView.swift | Prevents background-thread SwiftUI state mutation |
 
+### v1.0.6 — Diagnostics, CrashGuard, Unified Logging & Resilience (October 2026)
+
+Full resilience upgrade adding pre-launch crash traps, structured error logging, SQLite self-healing integrity recovery, and UI-level diagnostics.
+
+#### Reliability & Crash Protection
+| Component | Implementation | Impact |
+|-----------|----------------|--------|
+| `CrashGuard` | `NSSetUncaughtExceptionHandler` + async-signal-safe POSIX handlers (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE`) | Persists structured JSON crash reports to disk before re-raising to OS |
+| `NetGaugeMacMain` | Custom `@main` entry point | Ensures crash handlers and fault checks run before AppKit/SwiftUI runtime initialization |
+| `AppLogger` | Centralized `os.Logger` wrapper with 5 categories (`app`, `network`, `store`, `ui`, `lifecycle`) | Eliminates silent failures, standardizes macOS Console logging, generates atomic `crash_context.json` |
+| `NGSignposter` | `OSSignposter` intervals around `captureOnce` | Enables sub-millisecond timeline profiling in Instruments |
+
+#### Database & Startup Resilience
+| Component | Implementation | Impact |
+|-----------|----------------|--------|
+| `UsageStore` Integrity Recovery | `PRAGMA integrity_check;` on startup; moves corrupt DB & sidecars to `netgauge.db.corrupt.<ts>` | Prevents startup crash loops caused by unexpected shutdowns or corrupted SQLite files |
+| `UsageStore` PRAGMAs | `PRAGMA synchronous=NORMAL;` and `PRAGMA foreign_keys=ON;` | Improves write performance while guaranteeing referential and crash integrity |
+| `DashboardModel` DB Retry | 2-attempt open with 2-second sleep backoff | Prevents launch failures due to early-boot file lock contention |
+| `AppDelegate` Startup Guard | 10-second timeout on `model.start()` via `withTaskGroup` | Protects against permanent application hangs if disk I/O stalls |
+
+#### Diagnostics UI
+| Component | Implementation | Impact |
+|-----------|----------------|--------|
+| **Diagnostics & Logs** Card | Added to Settings tab | Single-click access to filtered `Console.app` logs, live crash report browser, and clipboard export |
+
 ### v1.0.5 — Crash & Auto-Close Fix + Battery Optimisation (August 2026)
 
 Full source-level audit identifying and fixing **15 bugs** across all four main source files, targeting the root causes of random auto-closing, menu bar disappearance, battery drain, and incorrect chart data.
@@ -153,7 +178,7 @@ Full source-level audit identifying and fixing **15 bugs** across all four main 
 All audit reports, test scenarios, fix summaries, and version logs are tracked in the `Docs` directory:
 
 - 📄 **netgauge_test_report.md**: Real-world test scenarios, identified issues, and verification results.
-- 📜 **version_history.md**: Full version log tracking v1.0.0 through v1.0.4.
+- 📜 **version_history.md**: Full version log tracking v1.0.0 through v1.0.6.
 - 🛠️ **fix_summary.md**: Technical breakdown of mathematical correctness fixes and troubleshooting guide.
 
 ---

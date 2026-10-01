@@ -1,5 +1,51 @@
 # NetGaugeMac — Version History & Changelog
 
+## [1.0.6] - 2026-10-01
+
+### Added
+- **CrashGuard Pre-Launch Protection**: Installed signal handlers (`SIGABRT`, `SIGSEGV`, `SIGBUS`, `SIGILL`, `SIGFPE`) and `NSSetUncaughtExceptionHandler` to log and persist structured crash reports to disk before re-raising.
+- **Unified App Logging (`AppLogger`)**: Centralized `os.Logger` facade across 5 categories (`app`, `network`, `store`, `ui`, `lifecycle`) and atomic `crash_context.json` generation on fatal events.
+- **Instruments Signpost Profiling (`NGSignposter`)**: Integrated signpost intervals on network capture loops for Instruments performance tracing.
+- **Diagnostics & Logs UI in Settings**: Added diagnostics card in Settings featuring direct Console.app launcher, interactive Crash Reports viewer with stack traces, and "Copy Diagnostic Report" clipboard exporter.
+- **Custom Entry Point (`NetGaugeMacMain`)**: Bootstrapped early process lifecycle to ensure crash traps and fault inspection run prior to AppKit/SwiftUI runtime initialization.
+
+### Fixed
+- **SQLite Database Corruption Auto-Recovery**: Added `PRAGMA integrity_check;` validation on launch; automatically quarantines corrupt databases (`netgauge.db.corrupt.<ts>`) along with WAL/SHM sidecars to prevent startup crash loops.
+- **Database Connection Retries**: Added retry with backoff for transient early-boot file locks in `DashboardModel.start()`.
+- **Startup Timeout Guard**: Enforced a 10-second timeout on `model.start()` in `AppDelegate` to prevent hangs caused by filesystem stalls.
+- **SQLite Performance & Safety PRAGMAs**: Configured `PRAGMA synchronous=NORMAL;` and `PRAGMA foreign_keys=ON;`.
+- **Silent Failure Logging**: Replaced silent try? blocks with detailed categorized logging across `UsageStore`, `DashboardModel`, and `NetworkSampler`.
+
+---
+
+## [1.0.5] - 2026-08-06
+
+### Fixed
+- **Startup Spin Loop**: `captureTask` now only starts after `UsageStore` initialization succeeds.
+- **Window Close Dangling Pointer**: `isReleasedWhenClosed = false` initialized immediately after `NSWindow` allocation.
+- **Graceful Termination Lockup**: Added hard 3-second timeout to `flushPendingData` in `applicationShouldTerminate`.
+- **Status Item Re-creation Race**: Managed delayed status item updates via a single cancellable `DispatchWorkItem`.
+- **Duplicate Menu Bar Item**: Removed redundant `setupStatusItem()` call inside text update routines.
+- **Background Battery Drain**: Added `windowIsVisible` flag slowing polling interval to 2s and suspending chart event queries when hidden.
+- **O(N) Event Refresh**: Rewrote `refreshEvents()` into a single O(N) pass over samples instead of 7 redundant filter passes.
+- **UI Label Allocations**: Cached `ByteCountFormatter` statically to avoid per-frame allocations during chart rendering.
+- **Unnecessary GPS Hardware Power**: Removed `manager.requestLocation()` call on startup.
+- **Main Thread UI Stalls**: Offloaded Wi-Fi/SystemConfiguration network name lookups to `Task.detached(priority: .utility)`.
+
+---
+
+## [1.0.4] - 2026-08-06
+
+### Fixed
+- **SQLite Concurrency**: Switched SQLite flags to `SQLITE_OPEN_FULLMUTEX` to prevent corruption under actor reentrancy.
+- **Integer Overflow**: Clamped UInt64 to Int64 conversions with `Int64(clamping:)`.
+- **Kernel Interface Flag Crash**: Converted `ifa_flags` comparisons to `UInt32` to avoid signed overflow traps.
+- **Kernel Memory Safety**: Added null-check guard for `ifa_name` pointer unwrap.
+- **Sleep/Wake Status Recovery**: Added `NSWorkspace.didWakeNotification` observer to restore status bar icon after sleep.
+- **Data Truncation Safety**: Lowered memory buffer force-flush threshold to 9,500 entries (avoiding 10,000-entry drop).
+
+---
+
 ## [1.0.3] - 2026-07-29
 
 ### Added
