@@ -68,8 +68,7 @@ struct DashboardView: View {
     private var topNavigationBar: some View {
         HStack(spacing: 16) {
             HStack(spacing: 10) {
-                if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-                   let nsImg = NSImage(contentsOf: url) {
+                if let nsImg = AppIconHelper.loadAppIcon() {
                     Image(nsImage: nsImg)
                         .resizable()
                         .frame(width: 24, height: 24)
@@ -1434,3 +1433,4 @@ private extension View {
         }
     }
 }
+

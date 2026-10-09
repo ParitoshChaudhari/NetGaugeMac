@@ -47,6 +47,15 @@ public struct SettingsView: View {
     @State private var showExportErrorAlert = false
     @State private var exportErrorMessage = ""
 
+    // iCloud Backup State
+    @StateObject private var cloudService = ICloudBackupService.shared
+    @AppStorage("isICloudAutoBackupEnabled") private var isAutoBackupEnabled = true
+    @State private var backupToRestore: ICloudBackupItem? = nil
+    @State private var showRestoreConfirmation = false
+    @State private var cloudToastMessage: String? = nil
+    @State private var showCloudErrorAlert = false
+    @State private var cloudErrorMessage = ""
+
     public init() {}
 
     public var body: some View {
@@ -65,11 +74,15 @@ public struct SettingsView: View {
 
                     storageCard
 
+                    iCloudCard
+
                     exportCard
 
                     diagnosticsCard
 
                     dangerCard
+
+                    aboutCard
                 }
                 .padding(24)
             }
@@ -132,10 +145,29 @@ public struct SettingsView: View {
                 .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
                 .padding(.top, 16)
                 .transition(.move(edge: .top).combined(with: .opacity))
+            } else if let msg = cloudToastMessage {
+                HStack(spacing: 10) {
+                    Image(systemName: "checkmark.icloud.fill")
+                        .foregroundStyle(NotesTheme.green)
+                    Text(msg)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NotesTheme.textPrimary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(NotesTheme.bgCardHover)
+                .clipShape(Capsule())
+                .overlay {
+                    Capsule().strokeBorder(NotesTheme.green.opacity(0.6), lineWidth: 1)
+                }
+                .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
+                .padding(.top, 16)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
         .animation(.snappy(duration: 0.25), value: showSuccessToast)
         .animation(.snappy(duration: 0.25), value: exportToastMessage)
+        .animation(.snappy(duration: 0.25), value: cloudToastMessage)
         .frame(minWidth: 580, idealWidth: 620, maxWidth: 740, minHeight: 600, idealHeight: 700)
         .alert("Clear All Network Data?", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) { }
@@ -154,6 +186,35 @@ public struct SettingsView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(exportErrorMessage)
+        }
+        .alert("Restore Network History from Backup?", isPresented: $showRestoreConfirmation) {
+            Button("Cancel", role: .cancel) { backupToRestore = nil }
+            Button("Restore Data", role: .destructive) {
+                guard let item = backupToRestore else { return }
+                Task { @MainActor in
+                    do {
+                        try await cloudService.performRestore(from: item.url, model: model)
+                        cloudToastMessage = "Restored \(item.fileName) successfully!"
+                        try? await Task.sleep(for: .seconds(3.5))
+                        cloudToastMessage = nil
+                    } catch {
+                        cloudErrorMessage = error.localizedDescription
+                        showCloudErrorAlert = true
+                    }
+                    backupToRestore = nil
+                }
+            }
+        } message: {
+            if let item = backupToRestore {
+                Text("Restoring from \(item.fileName) will replace current database history with this snapshot (\(item.formattedTraffic) recorded). An automatic safety checkpoint will be saved.")
+            } else {
+                Text("This will restore the database from the selected backup file.")
+            }
+        }
+        .alert("iCloud Backup Error", isPresented: $showCloudErrorAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text(cloudErrorMessage)
         }
         .sheet(isPresented: $showCrashReportsSheet) {
             NotesCrashReportsSheet(reports: crashReports)
@@ -352,6 +413,369 @@ public struct SettingsView: View {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appending(path: "NetGaugeMac/netgauge.db").path ?? "Unknown"
+    }
+
+    // MARK: - Card: iCloud Backup & Restore
+
+    private var iCloudCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            // Header
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(NotesTheme.accentBg)
+                        .frame(width: 32, height: 32)
+                    Image(systemName: "icloud.and.arrow.up.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(NotesTheme.accent)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("iCloud Backup & Restore")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(NotesTheme.textPrimary)
+
+                        Text("iCloud Drive")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(NotesTheme.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(NotesTheme.accentBg)
+                            .clipShape(Capsule())
+                            .overlay {
+                                Capsule().strokeBorder(NotesTheme.accentBorder, lineWidth: 0.8)
+                            }
+                    }
+
+                    Text("Safely snapshot, sync, and restore network traffic SQLite history.")
+                        .font(.caption)
+                        .foregroundStyle(NotesTheme.textSecondary)
+                }
+
+                Spacer()
+            }
+
+            NotesTheme.divider.frame(height: 1)
+
+            // Storage Folder Info Row
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Storage Destination")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(NotesTheme.textPrimary)
+                    Text(cloudService.folderDisplayName)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(NotesTheme.textMuted)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                HStack(spacing: 6) {
+                    if cloudService.isUsingCustomFolder {
+                        Button("Reset") {
+                            cloudService.resetToDefaultFolder()
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(NotesTheme.red)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(NotesTheme.bgCardHover)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .buttonStyle(.plain)
+                    }
+
+                    Button {
+                        cloudService.promptSelectICloudFolder()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "folder.badge.gearshape")
+                            Text("Change Folder...")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(NotesTheme.textPrimary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(NotesTheme.bgCardHover)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 6).strokeBorder(NotesTheme.border, lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(12)
+            .background(NotesTheme.bgCardHover.opacity(0.5))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            // Auto-Backup Row
+            HStack(alignment: .center) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Automatic Daily Backup")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(NotesTheme.textPrimary)
+                    HStack(spacing: 6) {
+                        Text("Creates a quiet background snapshot once per day.")
+                            .font(.caption)
+                            .foregroundStyle(NotesTheme.textSecondary)
+                        if let last = cloudService.lastBackupDate {
+                            Text("· Last:")
+                                .font(.caption)
+                                .foregroundStyle(NotesTheme.textMuted)
+                            Text(last, style: .relative)
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(NotesTheme.accent)
+                            Text("ago")
+                                .font(.caption)
+                                .foregroundStyle(NotesTheme.textMuted)
+                        }
+                    }
+                }
+
+                Spacer()
+
+                Toggle("", isOn: $isAutoBackupEnabled)
+                    .toggleStyle(SwitchToggleStyle(tint: NotesTheme.accent))
+                    .labelsHidden()
+            }
+
+            // Primary Action Buttons
+            HStack(spacing: 10) {
+                // Backup Now Button
+                Button {
+                    Task { @MainActor in
+                        do {
+                            let item = try await cloudService.performBackup(model: model)
+                            cloudToastMessage = "iCloud backup complete (\(item.formattedSize))"
+                            try? await Task.sleep(for: .seconds(3.5))
+                            cloudToastMessage = nil
+                        } catch {
+                            cloudErrorMessage = error.localizedDescription
+                            showCloudErrorAlert = true
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if cloudService.isBackingUp {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Image(systemName: "arrow.clockwise.icloud.fill")
+                        }
+                        Text(cloudService.isBackingUp ? "Backing Up..." : "Backup to iCloud Now")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(NotesTheme.bgBase)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(NotesTheme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .shadow(color: NotesTheme.accent.opacity(0.35), radius: 6, y: 2)
+                }
+                .buttonStyle(.plain)
+                .disabled(cloudService.isBackingUp || cloudService.isRestoring)
+
+                // Restore from File Button
+                Button {
+                    Task { @MainActor in
+                        do {
+                            let didRestore = try await cloudService.promptImportAndRestore(model: model)
+                            if didRestore {
+                                cloudToastMessage = "Database restored successfully from backup!"
+                                try? await Task.sleep(for: .seconds(3.5))
+                                cloudToastMessage = nil
+                            }
+                        } catch {
+                            cloudErrorMessage = error.localizedDescription
+                            showCloudErrorAlert = true
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.arrow.down.on.square")
+                        Text("Restore from File...")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(NotesTheme.textPrimary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(NotesTheme.bgCardHover)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6).strokeBorder(NotesTheme.border, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(cloudService.isBackingUp || cloudService.isRestoring)
+
+                // Export File Button
+                Button {
+                    Task { @MainActor in
+                        do {
+                            if let savedURL = try await cloudService.promptExportBackup(model: model) {
+                                cloudToastMessage = "Exported backup to \(savedURL.lastPathComponent)"
+                                try? await Task.sleep(for: .seconds(3.5))
+                                cloudToastMessage = nil
+                            }
+                        } catch {
+                            cloudErrorMessage = error.localizedDescription
+                            showCloudErrorAlert = true
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "arrow.up.doc")
+                        Text("Export...")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(NotesTheme.textSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(NotesTheme.bgCardHover)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6).strokeBorder(NotesTheme.border, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(cloudService.isBackingUp || cloudService.isRestoring)
+            }
+
+            // Available Backups List
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Available Backups (\(cloudService.backups.count))")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(NotesTheme.textPrimary)
+
+                    Spacer()
+
+                    Button {
+                        cloudService.refreshFolderAndBackups()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11))
+                            .foregroundStyle(NotesTheme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Refresh backup list")
+                }
+
+                if cloudService.backups.isEmpty {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 6) {
+                            Image(systemName: "icloud.slash")
+                                .font(.system(size: 22))
+                                .foregroundStyle(NotesTheme.textMuted)
+                            Text("No backups found in selected storage.")
+                                .font(.caption)
+                                .foregroundStyle(NotesTheme.textSecondary)
+                        }
+                        .padding(.vertical, 16)
+                        Spacer()
+                    }
+                    .background(NotesTheme.bgCardHover.opacity(0.3))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    VStack(spacing: 6) {
+                        ForEach(cloudService.backups.prefix(5)) { item in
+                            backupRow(item: item)
+                        }
+                    }
+                }
+            }
+        }
+        .padding(18)
+        .notesCard()
+    }
+
+    private func backupRow(item: ICloudBackupItem) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "externaldrive.fill.badge.icloud")
+                .font(.system(size: 14))
+                .foregroundStyle(NotesTheme.accent)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.fileName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(NotesTheme.textPrimary)
+                    .lineLimit(1)
+
+                HStack(spacing: 6) {
+                    Text(item.formattedDate)
+                        .font(.caption2)
+                        .foregroundStyle(NotesTheme.textSecondary)
+                    Text("·")
+                        .font(.caption2)
+                        .foregroundStyle(NotesTheme.textMuted)
+                    Text(item.formattedSize)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(NotesTheme.accent)
+                    if item.totalBytes > 0 {
+                        Text("·")
+                            .font(.caption2)
+                            .foregroundStyle(NotesTheme.textMuted)
+                        Text(item.formattedTraffic)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(NotesTheme.textSecondary)
+                    }
+                }
+            }
+
+            Spacer()
+
+            HStack(spacing: 6) {
+                Button {
+                    backupToRestore = item
+                    showRestoreConfirmation = true
+                } label: {
+                    Text("Restore")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(NotesTheme.accent)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(NotesTheme.accentBg)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 5).strokeBorder(NotesTheme.accentBorder, lineWidth: 0.8)
+                        }
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    cloudService.revealInFinder(item: item)
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 10))
+                        .foregroundStyle(NotesTheme.textMuted)
+                        .padding(5)
+                        .background(NotesTheme.bgCardHover)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Reveal in Finder")
+
+                Button {
+                    try? cloudService.deleteBackup(item: item)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 10))
+                        .foregroundStyle(NotesTheme.red.opacity(0.8))
+                        .padding(5)
+                        .background(NotesTheme.bgCardHover)
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Delete backup")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(NotesTheme.bgCardHover)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 
     // MARK: - Card: Export Data
@@ -901,6 +1325,113 @@ public struct SettingsView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(NotesTheme.red.opacity(0.35), lineWidth: 1)
         }
+    }
+
+    // MARK: - Card 7: About NetGauge
+
+    private var aboutCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                if let img = AppIconHelper.loadAppIcon() {
+                    Image(nsImage: img)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 38, height: 38)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(NotesTheme.borderAccent, lineWidth: 1)
+                        }
+                } else {
+                    Image(systemName: "gauge.with.dots.needle.bottom.50percent")
+                        .font(.system(size: 24))
+                        .foregroundStyle(NotesTheme.accent)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text("NetGauge")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(NotesTheme.textPrimary)
+
+                        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
+                        Text("v\(version)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(NotesTheme.accent)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(NotesTheme.accentBg)
+                            .clipShape(Capsule())
+                            .overlay {
+                                Capsule().strokeBorder(NotesTheme.accentBorder, lineWidth: 0.8)
+                            }
+                    }
+
+                    Text("Created by Paritosh Chaudhari")
+                        .font(.caption)
+                        .foregroundStyle(NotesTheme.textSecondary)
+                }
+
+                Spacer()
+
+                Button {
+                    AppDelegate.shared?.showAboutPanel()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "info.circle")
+                        Text("About Panel")
+                    }
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(NotesTheme.textPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(NotesTheme.bgCardHover)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(NotesTheme.border, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            NotesTheme.divider.frame(height: 1)
+
+            Text("A native real-time network usage monitor with tiered SQLite retention strategy.")
+                .font(.caption)
+                .foregroundStyle(NotesTheme.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                Link(destination: URL(string: "https://github.com/ParitoshChaudhari/NetGaugeMac")!) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "link")
+                            .font(.system(size: 11, weight: .semibold))
+                        Text("github.com/ParitoshChaudhari/NetGaugeMac")
+                            .font(.system(size: 11.5, weight: .medium))
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .foregroundStyle(NotesTheme.accent)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(NotesTheme.accentBg)
+                    .clipShape(Capsule())
+                    .overlay {
+                        Capsule().strokeBorder(NotesTheme.accentBorder, lineWidth: 1)
+                    }
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Text("Copyright © 2026 Paritosh Chaudhari")
+                    .font(.system(size: 10))
+                    .foregroundStyle(NotesTheme.textMuted)
+            }
+        }
+        .padding(18)
+        .notesCard()
     }
 }
 

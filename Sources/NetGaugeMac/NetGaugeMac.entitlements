@@ -21,5 +21,9 @@
     <!-- Read/Write File Permission for Exported Reports & User Selection -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
+
+    <!-- Security-Scoped Bookmarks for Persisting User-Selected iCloud Folders -->
+    <key>com.apple.security.files.bookmarks.app-scope</key>
+    <true/>
 </dict>
 </plist>

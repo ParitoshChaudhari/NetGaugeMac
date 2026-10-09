@@ -31,8 +31,17 @@ The application is built on top of Apple's developer guidelines (HIG) using Swif
   * **Daily rollup (90 days)**: Hourly rows older than 90 days are rolled up into `network_days` and retained indefinitely, keeping database footprint minimal forever.
   * **Self-Healing Migrator**: Automatically upgrades older single-primary-key schemas to composite-key schemas on launch with zero data loss.
 * **Auto-Start on Boot**: Login item registration (`SMAppService`) with a smart system uptime heuristic: if launched within 120 seconds of boot, it starts hidden in the Menu Bar automatically.
-* **Drag-and-Drop Installation**: Distributed as a native installer disk image (`NetGaugeMac.dmg`).
-* **High-Res App Icon & Developer Credits**: Dynamically loaded application icon with developer credits to **Paritosh Chaudhari**.
+* **iCloud Backup & Restore**:
+  * **Zero-Lock Atomic Backups**: Powered by SQLite's native online backup engine (`sqlite3_backup`), capturing full consistent database snapshots on the fly without interrupting real-time traffic monitoring.
+  * **iCloud Drive & Custom Directory Support**: Choose any folder in iCloud Drive or local storage; persists permissions across reboots using security-scoped bookmarks (`com.apple.security.files.bookmarks.app-scope`).
+  * **Safety Pre-Check on Restore**: Runs `PRAGMA integrity_check` before loading any snapshot to guarantee zero database corruption.
+  * **Portable Export & Import**: Export standalone `.ngbackup` files to share or archive, or restore directly from any `.ngbackup` or `.db` file.
+  * **Automated Daily Backups**: Background scheduler automatically creates daily backups without user intervention.
+  * **Backup Management**: View, restore, delete, or reveal backups in Finder directly from the Settings interface.
+* **Standalone Settings Window**: Menu bar "Settings..." (`Cmd+,`) launches a clean, dedicated 700x640 window rather than cluttering the dashboard view.
+* **Redesigned About Window**: Styled with the NotesTheme design system, displaying dynamic app build metadata, developer credits, and a direct clickable GitHub repository link.
+* **High-Res App Icon & Volume Icon**: Custom squircle application icon with high-contrast dual-tone traffic indicators, bundled into a 1024x1024 multi-resolution `.icns` file and applied to the DMG volume.
+* **High-Res App Icon & Developer Credits**: Dynamically loaded application icon with developer credits to **Paritosh Chaudhari** ([GitHub Repo](https://github.com/ParitoshChaudhari/NetGaugeMac)).
 
 ---
 
@@ -59,6 +68,21 @@ The application is built on top of Apple's developer guidelines (HIG) using Swif
 ---
 
 ## Version History
+
+### v1.0.7 — iCloud Backup & Restore, Standalone Settings & UI Modernization (October 2026)
+
+Major capability release adding zero-lock online iCloud backups, standalone Settings window architecture, new visual identity, and modernized About dialog.
+
+#### Key Features in v1.0.7
+| Feature | Implementation | Description |
+|---------|----------------|-------------|
+| **iCloud Online Backup** | `sqlite3_backup` in `UsageStore.swift` | Zero-lock atomic snapshot engine; creates complete database backups while active network sampling continues |
+| **Security-Scoped Bookmarks** | `ICloudBackupService.swift` + `NetGaugeMac.entitlements` | Allows choosing any iCloud Drive or local folder with persistent filesystem access across restarts |
+| **Restore Pre-Flight Verification** | `PRAGMA integrity_check` | Scans any restored `.ngbackup` or `.db` file prior to replacement to guarantee data safety |
+| **Automated Daily Backups** | Launch hook in `App.swift` | Automatically backs up network history once every 24 hours in the background if enabled |
+| **Standalone Settings Window** | `AppDelegate.openSettingsWindow()` | Opens Settings in an independent 700x640 window rather than occupying the Dashboard view |
+| **Redesigned About Section** | `AboutView.swift` | NotesTheme card styling, dynamic version/build information, developer credits, and clickable GitHub link |
+| **New Icon & DMG Branding** | 1024x1024 multi-res `.icns` + `AppIcon.png` | Fresh squircle identity with high-contrast upload/download accents applied to app and DMG volume |
 
 ### v1.0.4 — Stability & Crash Fix Release (August 2026)
 

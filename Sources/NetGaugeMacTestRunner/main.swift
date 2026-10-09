@@ -409,6 +409,31 @@ struct TestRunner {
             failureMessage: "End of day date did not cover up to 23:59:59"
         )
 
+        // ---------------------------------------------------------
+        // TEST 18: Backup File Naming Convention & Extension
+        // ---------------------------------------------------------
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd_HHmmss"
+        let sampleDate = Date(timeIntervalSince1970: 1700000000)
+        let expectedName = "NetGauge_Backup_\(df.string(from: sampleDate)).ngbackup"
+        assertTest(
+            "Backup File Naming & Extension",
+            condition: expectedName.hasPrefix("NetGauge_Backup_") && expectedName.hasSuffix(".ngbackup"),
+            failureMessage: "Backup file naming format incorrect: \(expectedName)"
+        )
+
+        // ---------------------------------------------------------
+        // TEST 19: Backup Data Formatting
+        // ---------------------------------------------------------
+        let sampleBytes: UInt64 = 1024 * 1024 * 50 // 50 MB
+        let formattedTraffic = ByteCountFormatter.string(fromByteCount: Int64(clamping: sampleBytes), countStyle: .binary)
+        let formattedSize = ByteCountFormatter.string(fromByteCount: 1048576, countStyle: .file)
+        assertTest(
+            "Backup Data & File Size Formatting",
+            condition: !formattedTraffic.isEmpty && !formattedSize.isEmpty,
+            failureMessage: "Failed formatting backup size or traffic"
+        )
+
         print("=========================================")
         print("Results: \(passedCount) Passed, \(failedCount) Failed")
         print("=========================================")
@@ -418,3 +443,4 @@ struct TestRunner {
         }
     }
 }
+

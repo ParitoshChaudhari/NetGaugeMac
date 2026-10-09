@@ -25,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let model = DashboardModel()
     private var statusItem: NSStatusItem?
     private var dashboardWindow: NSWindow?
+    private var settingsWindow: NSWindow?
+    private var aboutWindow: NSWindow?
 
     private var isQuittingFromMenu = false
     private var isSystemShuttingDown = false
@@ -41,8 +43,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         AppLogger.info(.lifecycle, "App launched — version \(version) (\(build)), macOS \(os)")
 
         // Set dynamic application icon
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-           let image = NSImage(contentsOf: url) {
+        if let image = AppIconHelper.loadAppIcon() {
             NSApplication.shared.applicationIconImage = image
         }
 
@@ -82,6 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else {
                 AppLogger.info(.lifecycle, "Normal launch — opening dashboard window")
                 self.openDashboardWindow()
+            }
+
+            // Check and trigger daily iCloud backup if enabled
+            Task { [weak self] in
+                guard let self else { return }
+                await ICloudBackupService.shared.checkAndPerformAutoBackupIfNeeded(model: self.model)
             }
         }
     }
@@ -199,7 +206,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func openDashboardAction() {
-        model.selectedTab = .dashboard
         openDashboardWindow()
     }
 
@@ -213,18 +219,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSApp.setActivationPolicy(.regular)
             restoreStatusItem()
         }
-        NSApp.activate(ignoringOtherApps: true)
-        let selector: Selector
-        if #available(macOS 14.0, *) {
-            selector = Selector(("showSettingsWindow:"))
-        } else {
-            selector = Selector(("showPreferencesWindow:"))
-        }
-        if !NSApp.sendAction(selector, to: nil, from: nil) {
-            DispatchQueue.main.async {
-                NSApp.sendAction(selector, to: nil, from: nil)
+
+        if let window = settingsWindow {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
             }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
         }
+
+        let contentView = SettingsView()
+            .environmentObject(model)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 700, height: 640),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.setFrameAutosaveName("NetGaugeSettingsWindow")
+        window.title = "NetGauge Settings"
+        window.titleVisibility = .visible
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = NSColor(red: 0.133, green: 0.118, blue: 0.102, alpha: 1.0)
+        window.delegate = self
+        window.contentView = NSHostingView(rootView: contentView)
+
+        self.settingsWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     @objc private func quitAppAction() {
@@ -348,58 +375,64 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // MARK: – NSWindowDelegate
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // Intercept close button and hide the window instead of destroying it.
-        // Cancel in-flight animations first to prevent VisualEffectView crash.
-        AppLogger.debug(.ui, "Dashboard window close intercepted — hiding instead")
-        NSAnimationContext.beginGrouping()
-        NSAnimationContext.current.duration = 0
-        NSAnimationContext.current.allowsImplicitAnimation = false
-        NSApp.setActivationPolicy(.accessory)
-        restoreStatusItem()
-        // Bug 7 (partial): window hidden — switch model to low-power accessory mode
-        model.windowIsVisible = false
-        sender.orderOut(nil)
-        NSAnimationContext.endGrouping()
-        return false
+        if sender == dashboardWindow {
+            // Intercept close button and hide the window instead of destroying it.
+            // Cancel in-flight animations first to prevent VisualEffectView crash.
+            AppLogger.debug(.ui, "Dashboard window close intercepted — hiding instead")
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            NSAnimationContext.current.allowsImplicitAnimation = false
+            if settingsWindow == nil || !(settingsWindow?.isVisible ?? false) {
+                NSApp.setActivationPolicy(.accessory)
+                restoreStatusItem()
+            }
+            // Bug 7 (partial): window hidden — switch model to low-power accessory mode
+            model.windowIsVisible = false
+            sender.orderOut(nil)
+            NSAnimationContext.endGrouping()
+            return false
+        } else if sender == settingsWindow {
+            AppLogger.debug(.ui, "Settings window close intercepted — hiding instead")
+            sender.orderOut(nil)
+            if dashboardWindow == nil || !(dashboardWindow?.isVisible ?? false) {
+                NSApp.setActivationPolicy(.accessory)
+                restoreStatusItem()
+            }
+            return false
+        }
+        return true
     }
 
     // MARK: – Custom About Panel
 
     @objc func showAboutPanel() {
-        let logo: NSImage
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "png"),
-           let img = NSImage(contentsOf: url) {
-            logo = img
-        } else {
-            logo = NSApplication.shared.applicationIconImage ?? NSImage()
+        if let window = aboutWindow {
+            if window.isMiniaturized {
+                window.deminiaturize(nil)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            return
         }
 
-        let credits = NSMutableAttributedString()
-        let style = NSMutableParagraphStyle()
-        style.alignment = .center
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 340, height: 410),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.setFrameAutosaveName("NetGaugeAbout")
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
+        window.backgroundColor = NSColor(red: 0.133, green: 0.118, blue: 0.102, alpha: 1.0)
+        window.contentView = NSHostingView(rootView: AboutView())
 
-        let devAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.boldSystemFont(ofSize: 12),
-            .paragraphStyle: style,
-            .foregroundColor: NSColor.labelColor
-        ]
-        credits.append(NSAttributedString(string: "Paritosh Chaudhari\n\n", attributes: devAttributes))
-
-        let infoAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10),
-            .paragraphStyle: style,
-            .foregroundColor: NSColor.secondaryLabelColor
-        ]
-        credits.append(NSAttributedString(string: "A native real-time network usage monitor with tiered SQLite retention strategy.", attributes: infoAttributes))
-
-        let options: [NSApplication.AboutPanelOptionKey: Any] = [
-            .applicationIcon: logo,
-            .credits: credits,
-            .applicationName: "NetGauge",
-            .version: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.6"
-        ]
-
-        NSApplication.shared.orderFrontStandardAboutPanel(options: options)
+        self.aboutWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     // MARK: – Helpers

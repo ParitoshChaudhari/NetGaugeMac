@@ -834,6 +834,33 @@ final class DashboardModel: ObservableObject {
         await refreshEvents()
     }
 
+    // MARK: – Backup & Restore
+
+    func backupDatabase(to destinationURL: URL) async throws {
+        guard let store else {
+            throw UsageStore.StoreError.applicationSupportDirectoryUnavailable
+        }
+        await flushPendingData()
+        try await store.createBackup(to: destinationURL)
+        AppLogger.info(.store, "Database backup created successfully at: \(destinationURL.lastPathComponent)")
+    }
+
+    func restoreDatabase(from sourceURL: URL) async throws {
+        guard let store else {
+            throw UsageStore.StoreError.applicationSupportDirectoryUnavailable
+        }
+        // Clear in-memory buffers to prevent stale entries from overwriting restored data
+        inMemorySamples.removeAll()
+        networkUsageDeltas.removeAll()
+        todayEvents.removeAll()
+
+        try await store.restore(from: sourceURL)
+        AppLogger.info(.store, "Database restored successfully from: \(sourceURL.lastPathComponent)")
+
+        // Refresh all dashboard and settings metrics from the restored DB
+        await refreshEvents()
+    }
+
     /// Flushes in-memory metrics and loads aggregated export report data.
     func buildExportReport(scope: ExportScope, startDate: Date, endDate: Date) async throws -> ExportReport {
         await flushPendingData()

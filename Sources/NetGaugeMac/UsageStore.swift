@@ -116,6 +116,78 @@ final class SQLiteDatabase {
         }
         return SQLiteStatement(stmt: stmt!)
     }
+
+    // MARK: - Online Backup & Restore
+
+    func backup(to destinationPath: String) throws {
+        var targetDb: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(destinationPath, &targetDb, flags, nil) != SQLITE_OK {
+            let errMsg = targetDb.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+            throw DatabaseError.openFailed("Failed to create backup target DB: \(errMsg)")
+        }
+        defer {
+            if targetDb != nil {
+                sqlite3_close_v2(targetDb)
+            }
+        }
+
+        // Flush WAL frames to ensure clean snapshot
+        try execute(sql: "PRAGMA wal_checkpoint(PASSIVE);")
+
+        guard let backup = sqlite3_backup_init(targetDb, "main", db, "main") else {
+            let errMsg = targetDb.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+            throw DatabaseError.executionFailed("sqlite3_backup_init failed: \(errMsg)")
+        }
+
+        let stepResult = sqlite3_backup_step(backup, -1)
+        let finishResult = sqlite3_backup_finish(backup)
+
+        if stepResult != SQLITE_DONE && finishResult != SQLITE_OK {
+            throw DatabaseError.executionFailed("sqlite3_backup_step failed: error code \(stepResult)")
+        }
+    }
+
+    func restore(from sourcePath: String) throws {
+        var sourceDb: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(sourcePath, &sourceDb, flags, nil) != SQLITE_OK {
+            let errMsg = sourceDb.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+            throw DatabaseError.openFailed("Failed to open backup source DB: \(errMsg)")
+        }
+        defer {
+            if sourceDb != nil {
+                sqlite3_close_v2(sourceDb)
+            }
+        }
+
+        // Integrity check of backup source file before restoring
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(sourceDb, "PRAGMA integrity_check;", -1, &stmt, nil) == SQLITE_OK {
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_step(stmt) == SQLITE_ROW,
+               let textPtr = sqlite3_column_text(stmt, 0) {
+                let status = String(cString: textPtr)
+                if status != "ok" {
+                    throw DatabaseError.executionFailed("Backup integrity check failed: \(status)")
+                }
+            }
+        }
+
+        guard let backup = sqlite3_backup_init(db, "main", sourceDb, "main") else {
+            let errMsg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
+            throw DatabaseError.executionFailed("sqlite3_backup_init for restore failed: \(errMsg)")
+        }
+
+        let stepResult = sqlite3_backup_step(backup, -1)
+        let finishResult = sqlite3_backup_finish(backup)
+
+        if stepResult != SQLITE_DONE && finishResult != SQLITE_OK {
+            throw DatabaseError.executionFailed("sqlite3_backup_step for restore failed: error code \(stepResult)")
+        }
+
+        try execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+    }
 }
 
 final class SQLiteStatement {
@@ -756,6 +828,53 @@ actor UsageStore {
         try database.execute(sql: "DELETE FROM network_usage;")
         // VACUUM must run outside any transaction (it commits its own transaction internally)
         try database.execute(sql: "VACUUM;")
+    }
+
+    // MARK: - iCloud & Local Backup / Restore
+
+    func createBackup(to destinationURL: URL) throws {
+        try database.backup(to: destinationURL.path)
+    }
+
+    func restore(from sourceURL: URL) throws {
+        try database.restore(from: sourceURL.path)
+    }
+
+    static func inspectBackupFile(at url: URL) -> (sampleCount: Int, networksCount: Int, totalBytes: UInt64) {
+        var tempDb: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
+        if sqlite3_open_v2(url.path, &tempDb, flags, nil) != SQLITE_OK {
+            return (0, 0, 0)
+        }
+        defer {
+            if tempDb != nil {
+                sqlite3_close_v2(tempDb)
+            }
+        }
+
+        var sampleCount = 0
+        var totalBytes: UInt64 = 0
+        var networks = Set<String>()
+
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(tempDb, "SELECT COUNT(*), TOTAL(bytes_rx + bytes_tx) FROM network_minutes;", -1, &stmt, nil) == SQLITE_OK {
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                sampleCount += Int(sqlite3_column_int64(stmt, 0))
+                totalBytes += UInt64(max(0, sqlite3_column_double(stmt, 1)))
+            }
+            sqlite3_finalize(stmt)
+        }
+
+        if sqlite3_prepare_v2(tempDb, "SELECT network_name FROM network_usage;", -1, &stmt, nil) == SQLITE_OK {
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let name = sqlite3_column_text(stmt, 0) {
+                    networks.insert(String(cString: name))
+                }
+            }
+            sqlite3_finalize(stmt)
+        }
+
+        return (sampleCount, networks.count, totalBytes)
     }
 
     // MARK: – Rollup Retention Jobs
