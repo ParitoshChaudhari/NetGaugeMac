@@ -260,10 +260,11 @@ final class ICloudBackupService: ObservableObject {
         isRestoring = true
         defer { isRestoring = false }
 
-        let isSecurityScoped = isUsingCustomFolder
-        let accessing = isSecurityScoped ? currentFolderURL?.startAccessingSecurityScopedResource() ?? false : false
+        let folderAccessing = isUsingCustomFolder ? currentFolderURL?.startAccessingSecurityScopedResource() ?? false : false
+        let fileAccessing = fileURL.startAccessingSecurityScopedResource()
         defer {
-            if accessing { currentFolderURL?.stopAccessingSecurityScopedResource() }
+            if fileAccessing { fileURL.stopAccessingSecurityScopedResource() }
+            if folderAccessing { currentFolderURL?.stopAccessingSecurityScopedResource() }
         }
 
         try await model.restoreDatabase(from: fileURL)

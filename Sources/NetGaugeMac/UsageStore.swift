@@ -146,12 +146,22 @@ final class SQLiteDatabase {
         if stepResult != SQLITE_DONE && finishResult != SQLITE_OK {
             throw DatabaseError.executionFailed("sqlite3_backup_step failed: error code \(stepResult)")
         }
+
+        // CRITICAL: Switch backup database to standard DELETE rollback journal mode.
+        // This clears the WAL header flag so the .ngbackup file is 100% self-contained
+        // and can be opened read-only anywhere without needing -shm or -wal sidecar files.
+        sqlite3_exec(targetDb, "PRAGMA journal_mode = DELETE;", nil, nil, nil)
     }
 
     func restore(from sourcePath: String) throws {
         var sourceDb: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-        if sqlite3_open_v2(sourcePath, &sourceDb, flags, nil) != SQLITE_OK {
+        // Open with READWRITE first so SQLite can migrate/convert WAL headers if needed
+        var openResult = sqlite3_open_v2(sourcePath, &sourceDb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+        if openResult != SQLITE_OK {
+            // Fallback to READONLY if source file is on read-only medium
+            openResult = sqlite3_open_v2(sourcePath, &sourceDb, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        }
+        if openResult != SQLITE_OK {
             let errMsg = sourceDb.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
             throw DatabaseError.openFailed("Failed to open backup source DB: \(errMsg)")
         }
@@ -160,6 +170,9 @@ final class SQLiteDatabase {
                 sqlite3_close_v2(sourceDb)
             }
         }
+
+        // Ensure source DB is normalized to DELETE mode if it was in WAL mode
+        sqlite3_exec(sourceDb, "PRAGMA journal_mode = DELETE;", nil, nil, nil)
 
         // Integrity check of backup source file before restoring
         var stmt: OpaquePointer?
@@ -174,6 +187,9 @@ final class SQLiteDatabase {
             }
         }
 
+        // Flush active WAL in destination database before overwriting
+        try execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
+
         guard let backup = sqlite3_backup_init(db, "main", sourceDb, "main") else {
             let errMsg = db.map { String(cString: sqlite3_errmsg($0)) } ?? "Unknown error"
             throw DatabaseError.executionFailed("sqlite3_backup_init for restore failed: \(errMsg)")
@@ -186,6 +202,8 @@ final class SQLiteDatabase {
             throw DatabaseError.executionFailed("sqlite3_backup_step for restore failed: error code \(stepResult)")
         }
 
+        // Ensure destination remains in high-performance WAL mode and truncate checkpoint
+        try execute(sql: "PRAGMA journal_mode = WAL;")
         try execute(sql: "PRAGMA wal_checkpoint(TRUNCATE);")
     }
 }
@@ -842,8 +860,11 @@ actor UsageStore {
 
     static func inspectBackupFile(at url: URL) -> (sampleCount: Int, networksCount: Int, totalBytes: UInt64) {
         var tempDb: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX
-        if sqlite3_open_v2(url.path, &tempDb, flags, nil) != SQLITE_OK {
+        var openResult = sqlite3_open_v2(url.path, &tempDb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil)
+        if openResult != SQLITE_OK {
+            openResult = sqlite3_open_v2(url.path, &tempDb, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
+        }
+        if openResult != SQLITE_OK {
             return (0, 0, 0)
         }
         defer {
@@ -851,6 +872,9 @@ actor UsageStore {
                 sqlite3_close_v2(tempDb)
             }
         }
+
+        // Normalize to DELETE mode if possible
+        sqlite3_exec(tempDb, "PRAGMA journal_mode = DELETE;", nil, nil, nil)
 
         var sampleCount = 0
         var totalBytes: UInt64 = 0
@@ -865,13 +889,20 @@ actor UsageStore {
             sqlite3_finalize(stmt)
         }
 
-        if sqlite3_prepare_v2(tempDb, "SELECT network_name FROM network_usage;", -1, &stmt, nil) == SQLITE_OK {
-            while sqlite3_step(stmt) == SQLITE_ROW {
-                if let name = sqlite3_column_text(stmt, 0) {
+        // Check cumulative network_usage table for all-time totals
+        var usageStmt: OpaquePointer?
+        if sqlite3_prepare_v2(tempDb, "SELECT network_name, bytes_rx + bytes_tx FROM network_usage;", -1, &usageStmt, nil) == SQLITE_OK {
+            var usageBytes: UInt64 = 0
+            while sqlite3_step(usageStmt) == SQLITE_ROW {
+                if let name = sqlite3_column_text(usageStmt, 0) {
                     networks.insert(String(cString: name))
                 }
+                usageBytes += UInt64(max(0, sqlite3_column_double(usageStmt, 1)))
             }
-            sqlite3_finalize(stmt)
+            sqlite3_finalize(usageStmt)
+            if usageBytes > totalBytes {
+                totalBytes = usageBytes
+            }
         }
 
         return (sampleCount, networks.count, totalBytes)
